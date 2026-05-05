@@ -1,0 +1,3 @@
+python-deriv-api
+python-dotenv
+websockets
