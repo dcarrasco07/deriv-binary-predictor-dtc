@@ -21,7 +21,7 @@ const MAX_DAILY_NET_LOSS      = parseFloat(process.env.MAX_DAILY_NET_LOSS) || 30
 const CONTRACT_DURATION_TICKS = 5;               
 const TICK_HISTORY_COUNT      = 10;              
 const POLL_INTERVAL_MS        = 3000;            // Slightly longer to allow contract settlement
-const MARTINGALE_MULTIPLIER   = 1.25;
+const MARTINGALE_MULTIPLIER   = 2;
 const SCAN_SYMBOLS            = ['R_100']; 
 
 let currentStake   = BET_AMOUNT;
