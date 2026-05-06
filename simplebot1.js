@@ -7,7 +7,7 @@ const DerivAPI = require('@deriv/deriv-api/dist/DerivAPI');
 const app_id           = process.env.APP_ID;
 const api_token        = process.env.API_TOKEN        || '';
 const deriv_account_id = process.env.DERIV_ACCOUNT_ID || '';
-const BET_AMOUNT        = parseFloat(process.env.BET_AMOUNT)        || 1;
+const BET_AMOUNT        = parseFloat(process.env.BET_AMOUNT)        || 0.20;
 const MIN_PAYOUT_RATE   = parseFloat(process.env.MIN_PAYOUT_RATE)   || 0.90;
 const DRY_RUN           = process.env.DRY_RUN === 'true';
 
