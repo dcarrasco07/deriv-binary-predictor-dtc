@@ -13,23 +13,17 @@ const DRY_RUN           = process.env.DRY_RUN === 'true';
 if (!app_id || !api_token || !deriv_account_id) {
     console.error('[BOT] Missing env vars: APP_ID, API_TOKEN, and DERIV_ACCOUNT_ID must all be set.');
     console.error('[BOT] On Railway: add them under your service → Variables tab.');
-    process.exit(1); // intentional — nothing works without credentials
+    process.exit(1); 
 }
 
-// ─── Risk management ─────────────────────────────────────────────────────────
-const MAX_DAILY_NET_LOSS    = parseFloat(process.env.MAX_DAILY_NET_LOSS) || 30; // stop if down $10 today
-const MAX_DAILY_TRADES      = 20;
-const CONTRACT_DURATION_MIN = 2;               // 2-minute contracts
-const CANDLE_GRANULARITY    = 120;             // 2-minute candles
-const TRAINING_CANDLES      = 500;             // history used to build pattern table
-const POLL_INTERVAL_MS      = 2 * 60 * 1000;  // re-evaluate every 2 minutes
+// ─── Risk management & Tuning ────────────────────────────────────────────────
+const MAX_DAILY_NET_LOSS      = parseFloat(process.env.MAX_DAILY_NET_LOSS) || 30; 
+const MAX_DAILY_TRADES        = 20;
+const CONTRACT_DURATION_TICKS = 4;               // 5-tick contracts
+const TICK_HISTORY_COUNT      = 10;              // Buffer of ticks to fetch
+const POLL_INTERVAL_MS        = 2000;            // Poll every 2 seconds
 
-// Pattern predictor tuning — also readable from .env
-const PATTERN_WINDOW  = parseInt(process.env.PATTERN_WINDOW)   || 2;
-const MIN_SAMPLES     = parseInt(process.env.MIN_SAMPLES)       || 10;
-const MIN_CONFIDENCE  = parseFloat(process.env.MIN_CONFIDENCE)  || 0.50;
-
-const SCAN_SYMBOLS = ['R_100']; // Volatility 10 Index (synthetic, 24/7, ~92% payout)
+const SCAN_SYMBOLS = ['R_100']; // Volatility 10 Index 
 
 // ─── Daily session tracking ───────────────────────────────────────────────────
 let session = {
@@ -37,10 +31,6 @@ let session = {
     trades: 0,
 };
 
-/**
- * Fetches today's actual net P&L from Deriv's profit_table API.
- * profit = sell_price - buy_price per contract (positive = win, negative = loss).
- */
 async function fetchTodayNetPnL() {
     try {
         const startOfDay = new Date();
@@ -65,7 +55,7 @@ async function fetchTodayNetPnL() {
         return netPnL;
     } catch (err) {
         console.warn('[BOT] Could not fetch profit table:', err.message);
-        return 0; // fail open — don't block trading on a fetch error
+        return 0; 
     }
 }
 
@@ -77,91 +67,10 @@ function resetSessionIfNewDay() {
     }
 }
 
-// ─── Pattern Predictor ────────────────────────────────────────────────────────
-
-/**
- * Converts a candle array into a binary sequence.
- * Each element is 1 (up candle: close > prev close) or 0 (down/flat candle).
- * Returns an array of length candles.length - 1.
- */
-function candlesToBits(candles) {
-    const bits = [];
-    for (let i = 1; i < candles.length; i++) {
-        bits.push(parseFloat(candles[i].close) > parseFloat(candles[i - 1].close) ? 1 : 0);
-    }
-    return bits;
-}
-
-/**
- * PatternPredictor — pure binary sequence learner.
- *
- * Scans every consecutive window of `windowSize` bits in the history and
- * records how often the NEXT bit is 1 (up) vs 0 (down).  When asked to
- * predict, it looks up the current window in the frequency table and returns
- * CALL / PUT / null depending on how confidently one direction dominates.
- *
- * No indicators, no price levels — only the raw up/down sequence matters.
- */
-class PatternPredictor {
-    constructor(windowSize = PATTERN_WINDOW, minSamples = MIN_SAMPLES, minConfidence = MIN_CONFIDENCE) {
-        this.windowSize    = windowSize;
-        this.minSamples    = minSamples;
-        this.minConfidence = minConfidence;
-        this.table         = {}; // key: bit-string → { up: n, down: n }
-    }
-
-    /** Build frequency table from a complete bit sequence. */
-    train(bits) {
-        this.table = {};
-        for (let i = this.windowSize; i < bits.length; i++) {
-            const key  = bits.slice(i - this.windowSize, i).join('');
-            const next = bits[i];
-            if (!this.table[key]) this.table[key] = { up: 0, down: 0 };
-            if (next === 1) this.table[key].up++;
-            else            this.table[key].down++;
-        }
-    }
-
-    /**
-     * Predict the next bit from the tail of `bits`.
-     * Returns 'CALL', 'PUT', or null (no confident signal).
-     */
-    predict(bits) {
-        if (bits.length < this.windowSize) return null;
-        const key   = bits.slice(-this.windowSize).join('');
-        const entry = this.table[key];
-        if (!entry) return null;
-
-        const total = entry.up + entry.down;
-        if (total < this.minSamples) return null;
-
-        const probUp   = entry.up   / total;
-        const probDown = entry.down / total;
-
-        if (probUp   >= this.minConfidence) return 'CALL';
-        if (probDown >= this.minConfidence) return 'PUT';
-        return null;
-    }
-
-    /** Log the full pattern table — useful for dry-run analysis. */
-    logTable() {
-        const rows = Object.entries(this.table)
-            .map(([key, { up, down }]) => ({ key, total: up + down, probUp: up / (up + down), up, down }))
-            .sort((a, b) => b.total - a.total);
-        console.log('\n[PREDICTOR] Pattern table (window=' + this.windowSize + '):');
-        console.log('  Pattern  Seen   P(up)   Up   Down');
-        for (const r of rows) {
-            const flag = r.probUp >= this.minConfidence ? ' ← CALL'
-                       : (1 - r.probUp) >= this.minConfidence ? ' ← PUT' : '';
-            console.log(`  ${r.key}     ${String(r.total).padEnd(6)} ${(r.probUp * 100).toFixed(1)}%   ${r.up}    ${r.down}${flag}`);
-        }
-    }
-}
-
 // ─── DerivAPI connection ──────────────────────────────────────────────────────
 
 let api;
-let wsConnection; // keep reference so we can check readyState
+let wsConnection; 
 
 async function initializeDerivAPI() {
     const otpResponse = await fetch(
@@ -188,10 +97,7 @@ async function initializeDerivAPI() {
     console.log('[BOT] DerivAPI connected.');
 }
 
-// Reconnects if the WebSocket has closed or is closing.
-// OTP-based connections expire, so this is expected to happen.
 async function ensureConnected() {
-    // readyState: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
     if (!wsConnection || wsConnection.readyState === 2 || wsConnection.readyState === 3) {
         console.log('[BOT] Connection lost — reconnecting …');
         await initializeDerivAPI();
@@ -200,48 +106,42 @@ async function ensureConnected() {
 
 // ─── Signal generation ────────────────────────────────────────────────────────
 
-const predictor = new PatternPredictor();
-
 async function getSignal(symbol) {
     const response = await api.basic.send({
         ticks_history:     symbol,
         adjust_start_time: 1,
-        count:             TRAINING_CANDLES,
+        count:             TICK_HISTORY_COUNT,
         end:               'latest',
-        style:             'candles',
-        granularity:       CANDLE_GRANULARITY,
+        style:             'ticks',
     });
 
     if (response.error) throw new Error(`ticks_history error: ${response.error.message}`);
 
-    const candles = response.candles;
-    if (!candles || candles.length < PATTERN_WINDOW + MIN_SAMPLES + 2) {
-        console.log('[BOT] Not enough candles to build pattern table.');
+    const prices = response.history?.prices;
+    if (!prices || prices.length < 3) {
+        console.log('[BOT] Not enough ticks to evaluate pattern.');
         return null;
     }
 
-    // Convert full history to bits, train on all but the very last bit,
-    // then predict what the next candle will be.
-    const bits          = candlesToBits(candles);           // length = candles.length - 1
-    const trainingBits  = bits.slice(0, -1);               // all except the most recent outcome
-    const predictionBits = bits.slice(-(PATTERN_WINDOW));  // current window to look up
+    // Convert raw tick prices into a binary sequence (1 = UP, 0 = DOWN/FLAT)
+    const bits = [];
+    for (let i = 1; i < prices.length; i++) {
+        bits.push(parseFloat(prices[i]) > parseFloat(prices[i - 1]) ? 1 : 0);
+    }
 
-    predictor.train(trainingBits);
-    const signal = predictor.predict(predictionBits);
+    // Grab the most recent 2 tick movements
+    const recentBits = bits.slice(-2).join('');
+    
+    // Check for the 00, 01, or 10 pattern
+    if (recentBits === '00' || recentBits === '01' || recentBits === '10') {
+        console.log(`[${new Date().toISOString()}] ${symbol} | Pattern: ${recentBits} -> PUT`);
+        return 'PUT';
+    }
 
-    // Log the current pattern and its stats
-    const key   = predictionBits.join('');
-    const entry = predictor.table[key];
-    const total = entry ? entry.up + entry.down : 0;
-    const probUp = entry && total > 0 ? (entry.up / total * 100).toFixed(1) : 'n/a';
-    console.log(
-        `[${new Date().toISOString()}] ${symbol} | ` +
-        `Pattern: ${key} | Seen: ${total}x | P(up): ${probUp}% | Signal: ${signal ?? 'NONE'}`
-    );
+    // Optional: log when it doesn't match (i.e., '11')
+    // console.log(`[${new Date().toISOString()}] ${symbol} | Pattern: ${recentBits} -> NONE`);
 
-    if (DRY_RUN && signal) predictor.logTable();
-
-    return signal;
+    return null;
 }
 
 // ─── Trade execution ──────────────────────────────────────────────────────────
@@ -257,10 +157,10 @@ async function executeTrade(symbol, direction) {
         proposal:          1,
         amount:            BET_AMOUNT,
         basis:             'stake',
-        contract_type:     direction,      // "CALL" or "PUT"
+        contract_type:     direction,      
         currency:          'USD',
-        duration:          CONTRACT_DURATION_MIN,
-        duration_unit:     'm',
+        duration:          CONTRACT_DURATION_TICKS,
+        duration_unit:     't', // 't' for ticks
         underlying_symbol: symbol,
     });
 
@@ -268,10 +168,9 @@ async function executeTrade(symbol, direction) {
         throw new Error(`Proposal error: ${proposalResponse.error.message}`);
     }
 
-    // Check actual payout rate before committing
     const { ask_price, payout, id: proposalId } = proposalResponse.proposal;
-    const payoutRate = (payout - ask_price) / ask_price; // net return as a fraction
-    console.log(`[BOT] Payout check — ask: $${ask_price} | payout: $${payout} | rate: ${(payoutRate * 100).toFixed(1)}%`);
+    const payoutRate = (payout - ask_price) / ask_price; 
+    
     if (payoutRate < MIN_PAYOUT_RATE) {
         console.log(`[BOT] Skipping — payout ${(payoutRate * 100).toFixed(1)}% below minimum ${(MIN_PAYOUT_RATE * 100).toFixed(0)}%`);
         return null;
@@ -298,13 +197,8 @@ async function tradingCycle() {
     await ensureConnected();
     resetSessionIfNewDay();
 
-    // if (session.trades >= MAX_DAILY_TRADES) {
-    //     console.log(`[BOT] Max daily trades (${MAX_DAILY_TRADES}) reached. Sitting out this cycle.`);
-    //     return;
-    // }
-
     const todayNetPnL = await fetchTodayNetPnL();
-    console.log(`[BOT] Today's net P&L: $${todayNetPnL.toFixed(2)}`);
+    
     if (todayNetPnL <= -MAX_DAILY_NET_LOSS) {
         console.log(`[BOT] Daily net loss limit hit ($${MAX_DAILY_NET_LOSS}). Sitting out this cycle.`);
         return;
@@ -320,20 +214,15 @@ async function tradingCycle() {
             continue;
         }
 
-        console.log(`[BOT] ${symbol} signal: ${signal ?? 'NONE'}`);
-
         if (signal === 'CALL' || signal === 'PUT') {
             try {
                 const result = await executeTrade(symbol, signal);
-                if (result !== null) { traded = true; break; } // one trade per cycle
+                if (result !== null) { traded = true; break; } 
             } catch (err) {
                 console.error(`[BOT] Trade error on ${symbol}:`, err.message);
             }
         }
     }
-    if (!traded) console.log('[BOT] No qualifying trade this cycle.');
-
-    console.log(`[BOT] Session: ${session.trades}/${MAX_DAILY_TRADES} trades | Net P&L today: $${todayNetPnL.toFixed(2)}`);
 }
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
@@ -354,11 +243,11 @@ async function connectWithRetry(maxAttempts = 5) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             await initializeDerivAPI();
-            return; // success
+            return; 
         } catch (err) {
             console.error(`[BOT] Connection attempt ${attempt}/${maxAttempts} failed: ${err.message}`);
             if (attempt === maxAttempts) throw err;
-            const wait = attempt * 5000; // 5s, 10s, 15s …
+            const wait = attempt * 5000; 
             console.log(`[BOT] Retrying in ${wait / 1000}s …`);
             await new Promise(r => setTimeout(r, wait));
         }
@@ -369,7 +258,7 @@ async function run() {
     if (DRY_RUN) console.log('[BOT] *** DRY RUN MODE — signals logged, no trades placed ***');
 
     await connectWithRetry();
-    console.log(`[BOT] Started. Evaluating every ${CONTRACT_DURATION_MIN} minutes.`);
+    console.log(`[BOT] Started. Polling ticks every ${POLL_INTERVAL_MS / 1000} seconds.`);
 
     await tradingCycle();
 
