@@ -98,19 +98,9 @@ async function getSignal(symbol) {
         bits.push(parseFloat(prices[i]) > parseFloat(prices[i - 1]) ? 1 : 0);
     }
 
-    const recentBits = bits.slice(-2).join('');
-    
-    // Pattern Logic:
-    // 00, 01 -> PUT
-    // 11, 10 -> CALL
-    if (recentBits === '00' || recentBits === '01') {
-        return { direction: 'PUT', pattern: recentBits };
-    } 
-    if (recentBits === '11' || recentBits === '10') {
-        return { direction: 'CALL', pattern: recentBits };
-    }
-
-    return null;
+    //random
+    const randomDirection = Math.random() > 0.5 ? 'PUT' : 'CALL';
+    return { direction: randomDirection, pattern: 'Bits' };
 }
 
 async function executeTrade(symbol, direction, stake) {
