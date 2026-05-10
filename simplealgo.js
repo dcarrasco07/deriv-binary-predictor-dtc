@@ -62,6 +62,7 @@ async function checkLastTradeResult() {
         });
 
         const contract = response.proposal_open_contract;
+        // if conntract is sold
         if (contract.is_sold) {
             const profit = parseFloat(contract.profit);
             if (profit > 0) {
