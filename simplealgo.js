@@ -8,8 +8,6 @@ const app_id           = '32WzmZD0GdX5NdJKlPO7e';
 const api_token        = 'pat_e20186217b7a6fe596656cb50430f440b88a30bbb9f83760dc86ec451117a6f1';
 const deriv_account_id = 'DOT90416964';
 const BET_AMOUNT        = 1;
-const MIN_PAYOUT_RATE   = 0.90;
-const DRY_RUN           = 'true';
 
 if (!app_id || !api_token || !deriv_account_id) {
     console.error('[BOT] Missing env vars: APP_ID, API_TOKEN, and DERIV_ACCOUNT_ID must all be set.');
@@ -17,7 +15,7 @@ if (!app_id || !api_token || !deriv_account_id) {
 }
 
 // ─── Risk Management & Martingale Settings ──────────────────────────────────
-const MAX_DAILY_NET_LOSS      = parseFloat(process.env.MAX_DAILY_NET_LOSS) || 30; 
+const MAX_DAILY_NET_LOSS      = 30; 
 const CONTRACT_DURATION_TICKS = 5;               
 const TICK_HISTORY_COUNT      = 10;              
 const POLL_INTERVAL_MS        = 3000;            // Slightly longer to allow contract settlement
@@ -55,7 +53,7 @@ async function fetchTodayNetPnL() {
 }
 
 async function checkLastTradeResult() {
-    if (!lastContractId || DRY_RUN) return;
+    if (!lastContractId) return;
 
     try {
         const response = await api.basic.send({
@@ -104,14 +102,8 @@ async function getSignal(symbol) {
 }
 
 async function executeTrade(symbol, direction, stake) {
-    if (DRY_RUN) {
-        console.log(`[DRY RUN] Pattern Match! Placing ${direction} @ $${stake.toFixed(2)}`);
-        // In dry run, we simulate a win to keep stake at base
-        lastContractId = null; 
-        return 'dry-run';
-    }
-
-    const proposal = await api.basic.send({
+    // 1. Get a Proposal first
+    let proposalResponse = await api.basic.send({
         proposal: 1,
         amount: parseFloat(stake.toFixed(2)),
         basis: 'stake',
@@ -122,17 +114,38 @@ async function executeTrade(symbol, direction, stake) {
         underlying_symbol: symbol,
     });
 
-    if (proposal.error) throw new Error(proposal.error.message);
+    // Fallback if 'symbol' is invalid (older/newer API versions might expect 'underlying_symbol')
+    if (proposalResponse.error && (proposalResponse.error.code === 'InvalidSymbol' || proposalResponse.error.message.includes('underlying_symbol'))) {
+        proposalResponse = await api.basic.send({
+            proposal: 1,
+            amount: parseFloat(stake.toFixed(2)),
+            basis: 'stake',
+            contract_type: direction,
+            currency: 'USD',
+            duration: CONTRACT_DURATION_TICKS,
+            duration_unit: 't',
+            underlying_symbol: symbol,
+        });
+    }
 
-    const buy = await api.basic.send({
-        buy: proposal.proposal.id,
+    if (proposalResponse.error) {
+        throw new Error(`Proposal failed: ${proposalResponse.error.message}`);
+    }
+
+    const proposalId = proposalResponse.proposal.id;
+
+    // 2. Buy the contract using the proposal ID
+    const buyResponse = await api.basic.send({
+        buy: proposalId,
         price: parseFloat(stake.toFixed(2)),
     });
 
-    if (buy.error) throw new Error(buy.error.message);
+    if (buyResponse.error) {
+        throw new Error(`Buy failed: ${buyResponse.error.message}`);
+    }
 
-    console.log(`[TRADE] Placed ${direction} | ID: ${buy.buy.contract_id} | Stake: $${stake.toFixed(2)}`);
-    return buy.buy.contract_id;
+    console.log(`[TRADE] Placed ${direction} | ID: ${buyResponse.buy.contract_id} | Stake: $${stake.toFixed(2)}`);
+    return buyResponse.buy.contract_id;
 }
 
 // ─── Connection & Cycle ──────────────────────────────────────────────────────
@@ -145,7 +158,11 @@ async function initializeDerivAPI() {
     const { data } = await otpResponse.json();
     wsConnection = new WebSocket(data.url);
     api = new DerivAPI({ connection: wsConnection });
-    console.log('[BOT] Connected to Deriv.');
+    
+    // Authorization is required for trading and getting proposals for most symbols
+    await api.basic.authorize(api_token);
+    
+    console.log('[BOT] Connected and Authorized to Deriv.');
 }
 
 async function tradingCycle() {
