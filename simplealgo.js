@@ -16,14 +16,15 @@ if (!app_id || !api_token || !deriv_account_id) {
 
 // ─── Risk Management & Martingale Settings ──────────────────────────────────
 const MAX_DAILY_NET_LOSS      = 30; 
-const CONTRACT_DURATION_MINUTES = 1;               
+const TICK_DURATION           = 5;               
 const TICK_HISTORY_COUNT      = 10;              
-const POLL_INTERVAL_MS        = 120000;            // Slightly longer to allow contract settlement
 const MARTINGALE_MULTIPLIER   = 2;
 const SCAN_SYMBOLS            = ['R_100']; 
 
 let currentStake   = BET_AMOUNT;
 let lastContractId = null;
+let isProcessing   = false;
+let tickHistory    = {}; 
 
 // ─── Session Tracking ────────────────────────────────────────────────────────
 let session = {
@@ -82,24 +83,20 @@ async function checkLastTradeResult() {
 }
 
 async function getSignal(symbol) {
-    const response = await api.basic.send({
-        ticks_history: symbol,
-        count: TICK_HISTORY_COUNT,
-        end: 'latest',
-        style: 'ticks',
-    });
-
-    const prices = response.history?.prices;
-    if (!prices || prices.length < 3) return null;
+    const prices = tickHistory[symbol];
+    if (!prices || prices.length < TICK_HISTORY_COUNT) return null;
 
     const bits = [];
     for (let i = 1; i < prices.length; i++) {
-        bits.push(parseFloat(prices[i]) > parseFloat(prices[i - 1]) ? 1 : 0);
+        bits.push(prices[i] > prices[i - 1] ? 1 : 0);
     }
 
-    //random
-    const randomDirection = Math.random() > 0.5 ? 'PUT' : 'CALL';
-    return { direction: randomDirection, pattern: 'Bits' };
+    // Example logic: if last 3 ticks are same direction
+    const lastThree = bits.slice(-3);
+    if (lastThree.length === 3 && lastThree.every(b => b === 1)) return { direction: 'CALL', pattern: 'UpStream' };
+    if (lastThree.length === 3 && lastThree.every(b => b === 0)) return { direction: 'PUT', pattern: 'DownStream' };
+
+    return null;
 }
 
 async function executeTrade(symbol, direction, stake) {
@@ -110,12 +107,12 @@ async function executeTrade(symbol, direction, stake) {
         basis: 'stake',
         contract_type: direction,
         currency: 'USD',
-        duration: CONTRACT_DURATION_MINUTES,
-        duration_unit: 'm',
+        duration: TICK_DURATION,
+        duration_unit: 't',
         underlying_symbol: symbol,
     });
 
-    // Fallback if 'symbol' is invalid (older/newer API versions might expect 'underlying_symbol')
+    // Fallback if 'symbol' is invalid
     if (proposalResponse.error && (proposalResponse.error.code === 'InvalidSymbol' || proposalResponse.error.message.includes('underlying_symbol'))) {
         proposalResponse = await api.basic.send({
             proposal: 1,
@@ -123,8 +120,8 @@ async function executeTrade(symbol, direction, stake) {
             basis: 'stake',
             contract_type: direction,
             currency: 'USD',
-            duration: CONTRACT_DURATION_MINUTES,
-            duration_unit: 'm',
+            duration: TICK_DURATION,
+            duration_unit: 't',
             underlying_symbol: symbol,
         });
     }
@@ -160,40 +157,71 @@ async function initializeDerivAPI() {
     wsConnection = new WebSocket(data.url);
     api = new DerivAPI({ connection: wsConnection });
     
-    // Authorization is required for trading and getting proposals for most symbols
+    // Authorization
     await api.basic.authorize(api_token);
+
+    // Subscribe to ticks
+    for (const symbol of SCAN_SYMBOLS) {
+        api.basic.send({ ticks: symbol, subscribe: 1 });
+    }
+
+    // Tick listener
+    wsConnection.on('message', (data) => {
+        const msg = JSON.parse(data);
+        if (msg.msg_type === 'tick') {
+            const symbol = msg.tick.symbol;
+            const price = parseFloat(msg.tick.quote);
+            if (!tickHistory[symbol]) tickHistory[symbol] = [];
+            tickHistory[symbol].push(price);
+            if (tickHistory[symbol].length > TICK_HISTORY_COUNT) {
+                tickHistory[symbol].shift();
+            }
+            tradingCycle();
+        }
+    });
     
-    console.log('[BOT] Connected and Authorized to Deriv.');
+    console.log('[BOT] Connected, Authorized, and Subscribed to ticks.');
 }
 
 async function tradingCycle() {
-    if (!wsConnection || wsConnection.readyState !== 1) await initializeDerivAPI();
+    if (isProcessing) return;
+    isProcessing = true;
 
-    // 1. Check if we are waiting for a trade result
-    if (lastContractId) {
-        await checkLastTradeResult();
-        return; // Don't place new trades until the last one is settled
-    }
+    try {
+        if (!wsConnection || wsConnection.readyState !== 1) {
+            await initializeDerivAPI();
+        }
 
-    // 2. Risk Check
-    const netPnL = await fetchTodayNetPnL();
-    if (netPnL <= -MAX_DAILY_NET_LOSS) {
-        console.log(`[STOP] Daily Loss Limit reached ($${netPnL}).`);
-        return;
-    }
+        // 1. Check if we are waiting for a trade result
+        if (lastContractId) {
+            await checkLastTradeResult();
+            return; // Don't place new trades until the last one is settled
+        }
 
-    // 3. Scan Symbols
-    for (const symbol of SCAN_SYMBOLS) {
-        const signal = await getSignal(symbol);
-        if (signal) {
-            console.log(`[SIGNAL] Pattern ${signal.pattern} detected on ${symbol}`);
-            try {
-                lastContractId = await executeTrade(symbol, signal.direction, currentStake);
-                break; 
-            } catch (err) {
-                console.error(`[BOT] Trade failed: ${err.message}`);
+        // 2. Risk Check
+        const netPnL = await fetchTodayNetPnL();
+        if (netPnL <= -MAX_DAILY_NET_LOSS) {
+            console.log(`[STOP] Daily Loss Limit reached ($${netPnL}).`);
+            process.exit(0);
+        }
+
+        // 3. Scan Symbols
+        for (const symbol of SCAN_SYMBOLS) {
+            const signal = await getSignal(symbol);
+            if (signal) {
+                console.log(`[SIGNAL] Pattern ${signal.pattern} detected on ${symbol}`);
+                try {
+                    lastContractId = await executeTrade(symbol, signal.direction, currentStake);
+                    break; 
+                } catch (err) {
+                    console.error(`[BOT] Trade failed: ${err.message}`);
+                }
             }
         }
+    } catch (err) {
+        console.error('[BOT] Cycle error:', err.message);
+    } finally {
+        isProcessing = false;
     }
 }
 
@@ -201,8 +229,7 @@ async function tradingCycle() {
 
 async function start() {
     await initializeDerivAPI();
-    setInterval(tradingCycle, POLL_INTERVAL_MS);
-    console.log(`[BOT] Running. Base stake: $${BET_AMOUNT} | Martingale: ${MARTINGALE_MULTIPLIER}x`);
+    console.log(`[BOT] Running. Base stake: $${BET_AMOUNT} | Martingale: ${MARTINGALE_MULTIPLIER}x | Duration: ${TICK_DURATION} ticks`);
 }
 
 start().catch(console.error);
