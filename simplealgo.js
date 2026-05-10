@@ -16,7 +16,7 @@ if (!app_id || !api_token || !deriv_account_id) {
 
 // ─── Risk Management & Martingale Settings ──────────────────────────────────
 const MAX_DAILY_NET_LOSS      = 30; 
-const CONTRACT_DURATION_TICKS = 5;               
+const CONTRACT_DURATION_MINUTES = 1;               
 const TICK_HISTORY_COUNT      = 10;              
 const POLL_INTERVAL_MS        = 3000;            // Slightly longer to allow contract settlement
 const MARTINGALE_MULTIPLIER   = 2;
@@ -109,8 +109,8 @@ async function executeTrade(symbol, direction, stake) {
         basis: 'stake',
         contract_type: direction,
         currency: 'USD',
-        duration: CONTRACT_DURATION_TICKS,
-        duration_unit: 't',
+        duration: CONTRACT_DURATION_MINUTES,
+        duration_unit: 'm',
         underlying_symbol: symbol,
     });
 
@@ -122,8 +122,8 @@ async function executeTrade(symbol, direction, stake) {
             basis: 'stake',
             contract_type: direction,
             currency: 'USD',
-            duration: CONTRACT_DURATION_TICKS,
-            duration_unit: 't',
+            duration: CONTRACT_DURATION_MINUTES,
+            duration_unit: 'm',
             underlying_symbol: symbol,
         });
     }
