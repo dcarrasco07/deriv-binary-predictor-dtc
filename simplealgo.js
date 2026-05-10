@@ -18,7 +18,7 @@ if (!app_id || !api_token || !deriv_account_id) {
 const MAX_DAILY_NET_LOSS      = 30; 
 const CONTRACT_DURATION_MINUTES = 1;               
 const TICK_HISTORY_COUNT      = 10;              
-const POLL_INTERVAL_MS        = 3000;            // Slightly longer to allow contract settlement
+const POLL_INTERVAL_MS        = 120000;            // Slightly longer to allow contract settlement
 const MARTINGALE_MULTIPLIER   = 2;
 const SCAN_SYMBOLS            = ['R_100']; 
 
