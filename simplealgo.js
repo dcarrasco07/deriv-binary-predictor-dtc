@@ -7,7 +7,7 @@ const DerivAPI = require('@deriv/deriv-api/dist/DerivAPI');
 const app_id           = '32WzmZD0GdX5NdJKlPO7e';
 const api_token        = 'pat_e20186217b7a6fe596656cb50430f440b88a30bbb9f83760dc86ec451117a6f1';
 const deriv_account_id = 'DOT90416964';
-const BET_AMOUNT        = (process.env.BET_AMOUNT || 1);
+const BET_AMOUNT        = 1;
 
 if (!app_id || !api_token || !deriv_account_id) {
     console.error('[BOT] Missing env vars: APP_ID, API_TOKEN, and DERIV_ACCOUNT_ID must all be set.');
