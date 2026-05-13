@@ -39,6 +39,7 @@ let wsConnection;
 
 async function fetchTodayNetPnL() {
     try {
+        // start of the day
         const startOfDay = new Date();
         startOfDay.setUTCHours(0, 0, 0, 0);
         const response = await api.basic.send({
