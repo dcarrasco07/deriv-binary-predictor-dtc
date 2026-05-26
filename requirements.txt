@@ -1,2 +1,0 @@
-python-deriv-api
-requests
