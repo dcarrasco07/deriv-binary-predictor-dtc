@@ -2,6 +2,8 @@ require('dotenv').config();
 
 const WebSocket = require('ws');
 const DerivAPI = require('@deriv/deriv-api/dist/DerivAPI');
+const https = require('https');
+
 
 // ─── Environment Variables ──────────────────────────────────────────────────
 const app_id           = '32WzmZD0GdX5NdJKlPO7e';
@@ -27,7 +29,11 @@ const SCAN_SYMBOLS            = ['R_100'];
 let currentStake   = BET_AMOUNT;
 let lastContractId = null;
 let isProcessing   = false;
-let tickHistory    = {}; 
+let tickHistory    = {};
+
+start();
+
+ 
 
 // ─── Session Tracking ────────────────────────────────────────────────────────
 let session = {
@@ -147,6 +153,10 @@ async function executeTrade(symbol, direction, stake) {
     console.log('Buy Response:', buyResponse); // Debug log
 
     if (buyResponse.error) {
+        if (buyResponse.error.code === 'InsufficientBalance') {
+            console.error('[BOT] Insufficient Balance. Resetting stake to initial BET_AMOUNT.');
+            currentStake = BET_AMOUNT; // Reset stake
+        }
         throw new Error(`Buy failed: ${buyResponse.error.message}`);
     }
 
@@ -157,38 +167,73 @@ async function executeTrade(symbol, direction, stake) {
 // ─── Connection & Cycle ──────────────────────────────────────────────────────
 
 async function initializeDerivAPI() {
-    const otpResponse = await fetch(`https://api.derivws.com/trading/v1/options/accounts/${deriv_account_id}/otp`, {
-        method: 'POST',
-        headers: { 'Deriv-App-ID': app_id, 'Authorization': `Bearer ${api_token}` },
-    });
-    const { data } = await otpResponse.json();
-    wsConnection = new WebSocket(data.url);
-    api = new DerivAPI({ connection: wsConnection });
-    
-    // Authorization
-    await api.basic.authorize(api_token);
+    try {
+        const otpResponse = await new Promise((resolve, reject) => {
+            const options = {
+                hostname: 'api.derivws.com',
+                path: `/trading/v1/options/accounts/${deriv_account_id}/otp`,
+                method: 'POST',
+                headers: {
+                    'Deriv-App-ID': app_id,
+                    'Authorization': `Bearer ${api_token}`,
+                    'Content-Type': 'application/json'
+                }
+            };
 
-    // Subscribe to ticks
-    for (const symbol of SCAN_SYMBOLS) {
-        api.basic.send({ ticks: symbol, subscribe: 1 });
-    }
+            const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', (chunk) => {
+                    data += chunk;
+                });
+                res.on('end', () => {
+                    resolve({
+                        status: res.statusCode,
+                        json: () => JSON.parse(data)
+                    });
+                });
+            });
 
-    // Tick listener
-    wsConnection.on('message', (data) => {
-        const msg = JSON.parse(data);
-        if (msg.msg_type === 'tick') {
-            const symbol = msg.tick.symbol;
-            const price = parseFloat(msg.tick.quote);
-            if (!tickHistory[symbol]) tickHistory[symbol] = [];
-            tickHistory[symbol].push(price);
-            if (tickHistory[symbol].length > TICK_HISTORY_COUNT) {
-                tickHistory[symbol].shift();
-            }
-            tradingCycle();
+            req.on('error', (error) => {
+                reject(error);
+            });
+            req.end();
+        }).catch(error => {
+            console.error('[BOT] HTTPS request error during OTP request:', error);
+            throw error;
+        });
+        console.log('OTP Response Status:', otpResponse.status);
+        const { data } = await otpResponse.json();
+        console.log('OTP Response Data:', data);
+        wsConnection = new WebSocket(data.url);
+        api = new DerivAPI({ connection: wsConnection });
+        
+        // Authorization
+        await api.basic.authorize(api_token);
+
+        // Subscribe to ticks
+        for (const symbol of SCAN_SYMBOLS) {
+            api.basic.send({ ticks: symbol, subscribe: 1 });
         }
-    });
-    
-    console.log('[BOT] Connected, Authorized, and Subscribed to ticks.');
+
+        // Tick listener
+        wsConnection.on('message', (data) => {
+            const msg = JSON.parse(data);
+            if (msg.msg_type === 'tick') {
+                const symbol = msg.tick.symbol;
+                const price = parseFloat(msg.tick.quote);
+                if (!tickHistory[symbol]) tickHistory[symbol] = [];
+                tickHistory[symbol].push(price);
+                if (tickHistory[symbol].length > TICK_HISTORY_COUNT) {
+                    tickHistory[symbol].shift();
+                }
+                tradingCycle();
+            }
+        });
+        
+        console.log('[BOT] Connected, Authorized, and Subscribed to ticks.');
+    } catch (error) {
+        console.error('[BOT] Error during Deriv API initialization:', error);
+    }
 }
 
 async function tradingCycle() {
@@ -215,7 +260,7 @@ async function tradingCycle() {
                     lastContractId = await executeTrade(symbol, signal.direction, currentStake);
                     break; 
                 } catch (err) {
-                    console.error(`[BOT] Trade failed: ${err} + ${err.message}`);
+                    console.error('[BOT] Trade failed:', err);
                 }
             }
         }
@@ -229,6 +274,7 @@ async function tradingCycle() {
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 
 async function start() {
+    console.log('[BOT] Starting bot...');
     await initializeDerivAPI();
     console.log(`[BOT] Running. Base stake: $${BET_AMOUNT} | Martingale: ${MARTINGALE_MULTIPLIER}x | Duration: ${TICK_DURATION} ticks`);
 }
