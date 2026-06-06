@@ -21,9 +21,9 @@ if (!app_id || !api_token || !deriv_account_id) {
 
 // ─── Risk Management & Martingale Settings ──────────────────────────────────
 const MAX_DAILY_NET_LOSS      = 30; 
-const TICK_DURATION           = 5;               
+const TICK_DURATION           = 1;               
 const TICK_HISTORY_COUNT      = 10;              
-const MARTINGALE_MULTIPLIER   = 2;
+const MARTINGALE_MULTIPLIER   = 1;
 const SCAN_SYMBOLS            = ['R_100']; 
 
 let currentStake   = BET_AMOUNT;
