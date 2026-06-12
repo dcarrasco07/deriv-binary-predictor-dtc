@@ -24,7 +24,7 @@ if (!app_id || !api_token || !deriv_account_id) {
 const MAX_DAILY_NET_LOSS      = 30; 
 const TICK_DURATION           = 1;               
 const TICK_HISTORY_COUNT      = 10;              
-const MARTINGALE_MULTIPLIER   = 2;
+const MARTINGALE_MULTIPLIER   = 2.5;
 const SCAN_SYMBOLS            = ['R_100']; 
 
 let currentStake   = BET_AMOUNT;
@@ -268,7 +268,9 @@ async function tradingCycle() {
                             //finalTradeDirection = 'CALL';
                             console.log('[TRADE_DECISION] Overriding signal: 01 pattern -> PUT');
                         } else if (lastTwo === '11') {
-                            finalTradeDirection = 'PUT';
+                            let randomIntNum = randomInt(0,1);
+                            finalTradeDirection = randomIntNum === 0 ? "CALL" : "PUT";
+                            //finalTradeDirection = 'PUT';
                             console.log('[TRADE_DECISION] Overriding signal: 11 pattern -> CALL');
                         } else if (lastTwo === '10') {
                             let randomIntNum = randomInt(0,1);
@@ -278,8 +280,8 @@ async function tradingCycle() {
                         }
                     }
 
-                    minCurrentStake = currentStake < 8 ? currentStake : 4;
-                    lastContractId = await executeTrade(symbol, finalTradeDirection, minCurrentStake); // Use finalTradeDirection
+                    //minCurrentStake = currentStake < 8 ? currentStake : 4;
+                    lastContractId = await executeTrade(symbol, finalTradeDirection, currentStake); // Use finalTradeDirection
                     lastPattern += signal;
                     actualLastPattern += actualsignal;
                     console.log("+=======================================+");
