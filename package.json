@@ -2,10 +2,10 @@
   "name": "deriv-binary-predictor",
   "version": "1.0.0",
   "description": "A JavaScript bot for Deriv API interactions, converted from Python.",
-  "main": "simplealgo.js",
+  "main": "simplealgo.bak.js",
   "scripts": {
-    "start": "concurrently \"node simplealgo.js\" \"node telegramalgo.js\"",
-    "dry-run": "DRY_RUN=true node simplealgo.js",
+    "start": "concurrently \"node simplealgo.bak.js\" \"node telegramalgo.js\"",
+    "dry-run": "DRY_RUN=true node simplealgo.bak.js",
     "backtest": "node backtest.js"
   },
   "keywords": [
