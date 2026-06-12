@@ -3,6 +3,7 @@ require('dotenv').config();
 const WebSocket = require('ws');
 const DerivAPI = require('@deriv/deriv-api/dist/DerivAPI');
 const https = require('https');
+const { randomInt } = require('crypto');
 
 
 // ─── Environment Variables ──────────────────────────────────────────────────
@@ -21,15 +22,18 @@ if (!app_id || !api_token || !deriv_account_id) {
 
 // ─── Risk Management & Martingale Settings ──────────────────────────────────
 const MAX_DAILY_NET_LOSS      = 30; 
-const TICK_DURATION           = 1;               
+const TICK_DURATION           = 3;               
 const TICK_HISTORY_COUNT      = 10;              
-const MARTINGALE_MULTIPLIER   = 1;
+const MARTINGALE_MULTIPLIER   = 2;
 const SCAN_SYMBOLS            = ['R_100']; 
 
 let currentStake   = BET_AMOUNT;
 let lastContractId = null;
 let isProcessing   = false;
 let tickHistory    = {};
+
+let lastPattern = "";
+let tradeSignal = 0;
 
 start();
 
@@ -64,6 +68,7 @@ async function fetchTodayNetPnL() {
 }
 
 async function checkLastTradeResult() {
+    
     if (!lastContractId) return;
 
     try {
@@ -73,6 +78,10 @@ async function checkLastTradeResult() {
         });
 
         const contract = response.proposal_open_contract;
+        let signal = contract.contract_type === "PUT" ? "1" : "0";
+        lastPattern = lastPattern + signal;
+        console.log("this is the last pattern detected.");
+        console.log(lastPattern)
         // if conntract is sold
         if (contract.is_sold) {
             const profit = parseFloat(contract.profit);
@@ -256,9 +265,53 @@ async function tradingCycle() {
             const signal = await getSignal(symbol);
             if (signal) {
                 console.log(`[SIGNAL] Pattern ${signal.direction} detected on ${symbol}`);
+                
+
+//00 - sell
+//01 - buy
+//11 - sell
+//10 - sell
+
                 try {
-                    lastContractId = await executeTrade(symbol, signal.direction, currentStake);
-                    break; 
+                    let finalTradeDirection = signal.direction; // Default to signal.direction
+
+                    if (lastPattern.length >= 2) {
+                        const lastTwo = lastPattern.slice(-2);
+                        if (lastTwo === '00') {
+                            finalTradeDirection = 'CALL';
+                            console.log('[TRADE_DECISION] Overriding signal: 00 pattern -> CALL');
+                        } else if (lastTwo === '01') {
+                            finalTradeDirection = 'PUT';
+                            console.log('[TRADE_DECISION] Overriding signal: 01 pattern -> PUT');
+                        } else if (lastTwo === '11') {
+                            finalTradeDirection = 'CALL';
+                            console.log('[TRADE_DECISION] Overriding signal: 11 pattern -> CALL');
+                        } else if (lastTwo === '10') {
+                            let randomInt = randomInt(0,1);
+                            finalTradeDirection = randomInt === 0 ? "CALL" : "PUT";
+                            //finalTradeDirection = 'PUT';    
+                            console.log('[TRADE_DECISION] Overriding signal: 10 pattern -> CALL');
+                        }
+                    }
+
+                    let signalDirection = finalTradeDirection === 'PUT' ? "1" : "0"; // This is for updating lastPattern
+                    minCurrentStake = currentStake < 8 ? currentStake : 4;
+                    lastContractId = await executeTrade(symbol, finalTradeDirection, minCurrentStake); // Use finalTradeDirection
+                    lastPattern = lastPattern + signalDirection;
+                    console.log("+=======================================+");
+                    console.log(lastPattern);
+
+                    // Log previous trades based on patterns
+                    if (lastPattern.endsWith('00')) {
+                        console.log('[TRADE_PATTERN] Previous trade: SELL (00)');
+                    } else if (lastPattern.endsWith('01')) {
+                        console.log('[TRADE_PATTERN] Previous trade: BUY (01)');
+                    } else if (lastPattern.endsWith('11')) {
+                        console.log('[TRADE_PATTERN] Previous trade: SELL (11)');
+                    } else if (lastPattern.endsWith('10')) {
+                        console.log('[TRADE_PATTERN] Previous trade: SELL (10)');
+                    }
+                    break;        
                 } catch (err) {
                     console.error('[BOT] Trade failed:', err);
                 }
