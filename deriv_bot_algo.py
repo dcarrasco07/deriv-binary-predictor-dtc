@@ -13,7 +13,7 @@ app_id = '32WzmZD0GdX5NdJKlPO7e'
 # api_token = 'pat_bc78db629feabf69a853ede8323ef15e2b35301f4af90273bfdd0c380edddda1'
 # deriv_account_id = 'ROT91151098'
 
-api_token = 'pat_e20186217b7a6fe596656cb50430f440b88a30bbb9f83760dc86ec451117a6f1';
+api_token = 'pat_e20186217b7a6fe596656cb50430f440b88a30bbb9f83760dc86ec451117a6f1'
 deriv_account_id = 'DOT90416964'
 
 APP_ID = os.getenv('DERIV_APP_ID', app_id) 
@@ -55,6 +55,9 @@ actual_last_pattern = "00"
 signal_flag = "0"
 actual_signal = "0"
 
+# --- Metrics Memory ---
+max_historical_loss = 0.0
+
 # --- Database Core Setup ---
 def init_db():
     """Initializes the persistent SQLite schema for tracking state."""
@@ -86,13 +89,21 @@ def init_db():
             captured_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS trade_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contract_id INTEGER UNIQUE,
+            profit_loss REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
 
 # --- Rebuild State from SQLite on Crash Recovery ---
 def recover_state_from_db():
-    """Queries SQLite history to cleanly rebuild runtime movement matrices."""
-    global last_raw_tick, windowed_movements, predictions_correct, pattern_stats
+    """Queries SQLite history to cleanly rebuild runtime movement matrices and historical loss thresholds."""
+    global last_raw_tick, windowed_movements, predictions_correct, pattern_stats, max_historical_loss
     
     windowed_movements = {size: deque(maxlen=size) for size in WINDOW_SIZES}
     predictions_correct = {size: {'correct': 0, 'total': 0} for size in WINDOW_SIZES}
@@ -101,6 +112,13 @@ def recover_state_from_db():
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+    
+    cursor.execute("SELECT MIN(profit_loss) FROM trade_results")
+    row_loss = cursor.fetchone()
+    if row_loss and row_loss[0] is not None:
+        max_historical_loss = abs(row_loss[0])
+    else:
+        max_historical_loss = 0.0
     
     cursor.execute('''
         SELECT window_size, pattern_str, result_str, SUM(is_correct), COUNT(*) 
@@ -156,7 +174,7 @@ def make_prediction_from_movements(movement_window):
 
 def write_readable_markdown_summary(last_quote):
     """Generates a highly readable markdown dashboard page from SQLite aggregation maps."""
-    global predictions_correct, pattern_stats
+    global predictions_correct, pattern_stats, max_historical_loss
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     
     try:
@@ -192,13 +210,17 @@ def write_readable_markdown_summary(last_quote):
                     f.write(f"* Pattern `{pattern_str}` (window) => `{result_str}` (result) -> Accuracy: **{p_rate:.2f}%** ({p_correct}/{p_total} hits)\n")
                 
                 f.write(f"\n---\n\n")
+            
+            f.write(f"## GLOBAL TRADING PERFORMANCE RISK ANALYSIS\n")
+            f.write(f"* **Largest Loss Encountered (All-Time)**: `-${max_historical_loss:.2f} {CURRENCY}`\n\n")
+            f.write(f"---\n")
+            
     except Exception as e:
         logging.error(f"Error drawing down readable report markdown file: {e}")
 
 async def execute_trade(websocket, direction, stake):
     """Executes proposal creation and purchase steps mapped precisely from the JS client logic."""
     try:
-        # Step 1: Request Contract Proposal
         proposal_req = {
             "proposal": 1,
             "amount": float(f"{stake:.2f}"),
@@ -211,7 +233,6 @@ async def execute_trade(websocket, direction, stake):
         }
         await websocket.send(json.dumps(proposal_req))
         
-        # Await proposal response frame loop
         async for message in websocket:
             res = json.loads(message)
             if res.get('msg_type') == 'proposal':
@@ -220,7 +241,6 @@ async def execute_trade(websocket, direction, stake):
                 proposal_id = res['proposal']['id']
                 break
         
-        # Step 2: Buy contract matching Proposal ID 
         buy_req = {
             "buy": proposal_id,
             "price": float(f"{stake:.2f}")
@@ -246,7 +266,7 @@ async def execute_trade(websocket, direction, stake):
 
 async def check_last_trade_result(websocket):
     """Determines winning loops or executes Martingale multiplications via API basic messaging rules."""
-    global last_contract_id, current_stake, signal_flag, actual_signal, last_pattern, actual_last_pattern
+    global last_contract_id, current_stake, signal_flag, actual_signal, last_pattern, actual_last_pattern, max_historical_loss
     if not last_contract_id:
         return
 
@@ -265,85 +285,42 @@ async def check_last_trade_result(websocket):
                 
                 if contract.get('is_sold'):
                     profit = float(contract.get('profit', 0))
+                    
+                    db_conn = sqlite3.connect(DB_FILE)
+                    db_cursor = db_conn.cursor()
+                    db_cursor.execute("INSERT OR IGNORE INTO trade_results (contract_id, profit_loss) VALUES (?, ?)", (last_contract_id, profit))
+                    db_conn.commit()
+                    db_conn.close()
+                    
                     if profit > 0:
                         logging.info(f"[RESULT] WIN (+${profit:.2f}). Resetting stake to ${BET_AMOUNT}")
                         actual_signal = "1" if contract.get('contract_type') == "PUT" else "0"
                         current_stake = BET_AMOUNT
                     else:
+                        logging.info(f"[RESULT] LOSS (${profit:.2f}). Martingale stake: ${current_stake * MARTINGALE_MULTIPLIER:.2f}")
                         current_stake = current_stake * MARTINGALE_MULTIPLIER
                         actual_signal = "0" if contract.get('contract_type') == "PUT" else "1"
-                        logging.info(f"[RESULT] LOSS (${profit:.2f}). Martingale stake: ${current_stake:.2f}")
+                        
+                        loss_magnitude = abs(profit)
+                        if loss_magnitude > max_historical_loss:
+                            max_historical_loss = loss_magnitude
                     
                     last_pattern += signal_flag
                     actual_last_pattern += actual_signal
                     
-                    logging.info("+=======================================+")
-                    logging.info(f"Last Pattern Tracked: {last_pattern}")
-                    logging.info(f"Actual Last Pattern:  {actual_last_pattern}")
-
-                    if actual_last_pattern.endswith('00'):
-                        logging.info('[TRADE_PATTERN] Previous trade: SELL (00)')
-                    elif actual_last_pattern.endswith('01'):
-                        logging.info('[TRADE_PATTERN] Previous trade: SELL (01)')
-                    elif actual_last_pattern.endswith('11'):
-                        logging.info('[TRADE_PATTERN] Previous trade: BUY (11)')
-                    elif actual_last_pattern.endswith('10'):
-                        logging.info('[TRADE_PATTERN] Previous trade: BUY (10)')
-                        
-                    last_contract_id = None # Cleared settlement lock
-                else:
-                    logging.info(f"[BOT] Waiting for contract {last_contract_id} to settle...")
+                    last_contract_id = None 
                 break
     except Exception as e:
         logging.error(f"[BOT] Error checking result framework: {e}")
 
-async def evaluate_trading_cycle(websocket):
-    """Integrates the JS override strategy rules logic with the multi-window indicators."""
-    global is_processing, last_contract_id, actual_last_pattern
-    if is_processing:
-        return
-    is_processing = True
-
-    try:
-        if last_contract_id:
-            await check_last_trade_result(websocket)
-            return
-
-        logging.info(f"signal: {signal_flag}")
-        if signal_flag:
-            logging.info(f"[SIGNAL] Pattern {signal_flag} detected on {SYMBOL}")
-            logging.info(f"last pattern: {last_pattern}")
-            
-            final_trade_direction = ""
-            if len(actual_last_pattern) >= 2:
-                last_two = actual_last_pattern[-2:]
-                if last_two == '00':
-                    final_trade_direction = 'CALL'
-                    logging.info('[TRADE_DECISION] Overriding signal: 00 pattern -> CALL')
-                elif last_two == '01':
-                    final_trade_direction = 'CALL'  # Follows JS override setting value
-                    logging.info('[TRADE_DECISION] Overriding signal: 01 pattern -> PUT')
-                elif last_two == '11':
-                    final_trade_direction = 'PUT'
-                    logging.info('[TRADE_DECISION] Overriding signal: 11 pattern -> CALL')
-                elif last_two == '10':
-                    final_trade_direction = 'CALL'
-                    logging.info('[TRADE_DECISION] Overriding signal: 10 pattern -> CALL')
-
-            if final_trade_direction:
-                last_contract_id = await execute_trade(websocket, final_trade_direction, current_stake)
-    except Exception as e:
-        logging.error(f"[BOT] Cycle execution logic error: {e}")
-    finally:
-        is_processing = false = False
-
 async def process_ticks(websocket):
-    global last_raw_tick, windowed_movements, predictions_correct, pattern_stats
+    global last_raw_tick, windowed_movements, predictions_correct, pattern_stats, last_contract_id, current_stake
 
     async for message in websocket:
         try:
             payload = json.loads(message)
             stats_updated = False
+            active_prediction = None
             
             if payload.get('msg_type') == 'tick' and 'tick' in payload:
                 tick_data = payload['tick']
@@ -368,6 +345,8 @@ async def process_ticks(websocket):
                             actual_outcome = int(step_direction)
 
                             if predicted_outcome is not None:
+                                # Captures the prediction generated by the active streaming engine window loops
+                                active_prediction = predicted_outcome
                                 is_hit = (predicted_outcome == actual_outcome)
                                 result_str = str(actual_outcome)
                                 
@@ -398,8 +377,14 @@ async def process_ticks(websocket):
                 if stats_updated:
                     write_readable_markdown_summary(current_tick['quote'])
                 
-                # Triggers the JS trade scanning framework sequence per tick instance
-                await evaluate_trading_cycle(websocket)
+                # --- AUTOMATED LIVE TRADING EVALUATION SEQUENCE ---
+                if last_contract_id:
+                    await check_last_trade_result(websocket)
+                elif active_prediction is not None:
+                    # Maps 0 -> CALL, 1 -> PUT based explicitly on Python generated prediction analytics
+                    trade_direction = "CALL" if active_prediction == 0 else "PUT"
+                    logging.info(f"[SIGNAL] Executing trade from Prediction Matrix logic value: -> {trade_direction}")
+                    last_contract_id = await execute_trade(websocket, trade_direction, current_stake)
 
             elif payload.get('msg_type') == 'transaction' and 'transaction' in payload:
                 t_data = payload['transaction']
@@ -432,11 +417,9 @@ async def main():
 
         try:
             async with websockets.connect(authenticated_ws_url) as websocket:
-                # Step 1: Send API Authorize call explicitly as executed in the JS codebase
                 auth_packet = {"authorize": API_TOKEN}
                 await websocket.send(json.dumps(auth_packet))
                 
-                # Read auth response
                 async for message in websocket:
                     auth_res = json.loads(message)
                     if auth_res.get('msg_type') == 'authorize':
@@ -446,7 +429,6 @@ async def main():
                         break
                 
                 retry_delay = 5
-                # Step 2: Establish streaming pipelines
                 await websocket.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
                 await websocket.send(json.dumps({"transaction": 1, "subscribe": 1}))
                 await process_ticks(websocket) 
