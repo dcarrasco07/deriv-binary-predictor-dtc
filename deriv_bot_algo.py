@@ -5,6 +5,7 @@ import websockets
 import logging
 import requests
 import sqlite3
+import secrets
 from collections import deque
 import time
 
@@ -25,7 +26,7 @@ DERIV_REST_OTP_URL = f"https://api.derivws.com/trading/v1/options/accounts/{deri
 BET_AMOUNT = 0.35
 CURRENCY = 'USD'
 MARTINGALE_MULTIPLIER = 2.5
-MAX_STAKE_CEILING = 142.0  # Explicitly defined risk barrier limit
+MAX_STAKE_CEILING = 142.0  # Hard upper boundary risk barrier
 TICK_DURATION = 1
 SYMBOL = 'R_100'  
 WINDOW_SIZES = range(2, 101) 
@@ -58,7 +59,8 @@ actual_signal = "0"
 
 # --- Metrics Memory ---
 max_historical_loss = 0.0
-total_net_pnl = 0.0
+total_net_pnl = 0.0      # All-time running profile history from Database
+session_net_pnl = 0.0    # HARD RESET TO 0 ON STARTUP FOR MARTINGALE RISK LOOPS
 
 # --- Database Core Setup ---
 def init_db():
@@ -105,7 +107,7 @@ def init_db():
 # --- Rebuild State from SQLite on Crash Recovery ---
 def recover_state_from_db():
     """Queries SQLite history to cleanly rebuild runtime movement matrices, historical loss thresholds, and total Net PnL."""
-    global last_raw_tick, windowed_movements, predictions_correct, pattern_stats, max_historical_loss, total_net_pnl, current_stake
+    global last_raw_tick, windowed_movements, predictions_correct, pattern_stats, max_historical_loss, total_net_pnl, session_net_pnl, current_stake
     
     windowed_movements = {size: deque(maxlen=size) for size in WINDOW_SIZES}
     predictions_correct = {size: {'correct': 0, 'total': 0} for size in WINDOW_SIZES}
@@ -115,7 +117,6 @@ def recover_state_from_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # 1. Recover largest loss from memory
     cursor.execute("SELECT MIN(profit_loss) FROM trade_results")
     row_loss = cursor.fetchone()
     if row_loss and row_loss[0] is not None:
@@ -123,7 +124,6 @@ def recover_state_from_db():
     else:
         max_historical_loss = 0.0
         
-    # 2. Recover all-time total running net profit or loss
     cursor.execute("SELECT SUM(profit_loss) FROM trade_results")
     row_pnl = cursor.fetchone()
     if row_pnl and row_pnl[0] is not None:
@@ -156,11 +156,11 @@ def recover_state_from_db():
             
     conn.close()
     
-    # If crash recovery occurs while total PnL is negative and we are in a drawdown recovery loop, maintain target floor parameters
-    if total_net_pnl < 0 and current_stake >= MAX_STAKE_CEILING:
-        current_stake = MAX_STAKE_CEILING
+    # Session Net PNL is intentionally left at 0.0 here to reset tracking on execution reboot
+    session_net_pnl = 0.0
+    current_stake = BET_AMOUNT
         
-    logging.info("Crash survival matrix fully restored from persistent SQLite storage engine.")
+    logging.info("Crash survival matrix fully restored. Session risk tracking engine set to $0.00 entry parameters.")
 
 def get_authenticated_ws_url():
     """Fetches WebSocket URL using the JS architecture logic pattern via REST."""
@@ -190,7 +190,7 @@ def make_prediction_from_movements(movement_window):
 
 def write_readable_markdown_summary(last_quote):
     """Generates a highly readable markdown dashboard page from SQLite aggregation maps."""
-    global predictions_correct, pattern_stats, max_historical_loss, total_net_pnl
+    global predictions_correct, pattern_stats, max_historical_loss, total_net_pnl, session_net_pnl, current_stake
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     
     try:
@@ -202,12 +202,15 @@ def write_readable_markdown_summary(last_quote):
             f.write(f"* **Underlying Database Engine**: `{DB_FILE}`\n\n")
             f.write(f"---\n\n")
             
-            # --- ALL-TIME RUNNING FINANCIAL SUMMARY STATISTICS ---
             f.write(f"## GLOBAL TRADING PERFORMANCE RISK ANALYSIS\n")
             pnl_sign = "+" if total_net_pnl >= 0 else ""
-            f.write(f"* **Total Net Profit/Loss (Running All-Time)**: `{pnl_sign}${total_net_pnl:.2f} {CURRENCY}`\n")
-            f.write(f"* **Largest Loss Encountered (Running All-Time)**: `-${max_historical_loss:.2f} {CURRENCY}`\n")
-            f.write(f"* **Current Active Position Stake Target**: `${current_stake:.2f} {CURRENCY}`\n\n")
+            session_sign = "+" if session_net_pnl >= 0 else ""
+            f.write(f"* **Total Net Profit/Loss (All-Time History)**: `{pnl_sign}${total_net_pnl:.2f} {CURRENCY}`\n")
+            f.write(f"* **Current Session Net Profit/Loss**: `{session_sign}${session_net_pnl:.2f} {CURRENCY}`\n")
+            f.write(f"* **Largest Loss Encountered (All-Time)**: `-${max_historical_loss:.2f} {CURRENCY}`\n")
+            
+            exec_mode = "CRYPTO RANDOMINT FLIP MODE" if current_stake >= MAX_STAKE_CEILING else "PREDICTION MATRIX MODE"
+            f.write(f"* **Current Active Position Stake Target**: `${current_stake:.2f} {CURRENCY}` (`{exec_mode}`)\n\n")
             f.write(f"---\n\n")
             
             for size in WINDOW_SIZES:
@@ -285,8 +288,8 @@ async def execute_trade(websocket, direction, stake):
         return None
 
 async def check_last_trade_result(websocket):
-    """Determines winning loops, handles max-stake lock limits, and processes Martingale resets based on absolute Net PnL."""
-    global last_contract_id, current_stake, signal_flag, actual_signal, last_pattern, actual_last_pattern, max_historical_loss, total_net_pnl, MARTINGALE_MULTIPLIER
+    """Determines winning loops, handles max-stake lock limits, and processes Martingale resets based on current run Session Net PnL."""
+    global last_contract_id, current_stake, signal_flag, actual_signal, last_pattern, actual_last_pattern, max_historical_loss, total_net_pnl, session_net_pnl, MARTINGALE_MULTIPLIER
     if not last_contract_id:
         return
 
@@ -312,31 +315,30 @@ async def check_last_trade_result(websocket):
                     db_conn.commit()
                     db_conn.close()
                     
-                    # Update all-time cumulative total balance running net profit or loss
+                    # Accumulate statistics to both pipelines independently
                     total_net_pnl += profit
+                    session_net_pnl += profit
                     
                     if profit > 0:
-                        # --- CRITICAL RISK ENGINE UPDATE ---
-                        # If we have reached or exceeded 142, hold the stake flat at 142 until Net Profit > 0
-                        if current_stake >= MAX_STAKE_CEILING and total_net_pnl <= 0:
+                        # --- RISK ENGINE RISK RECOVERY EVALUATION ---
+                        # Uses 'session_net_pnl' to ensure logic is tracked "as you go" per server iteration instance
+                        if current_stake >= MAX_STAKE_CEILING and session_net_pnl <= 0:
                             current_stake = MAX_STAKE_CEILING
-                            logging.info(f"[RESULT] WIN (+${profit:.2f}). Total Net PnL is still in drawdown (${total_net_pnl:.2f}). RETAINING STAKE AT CEILING: ${current_stake:.2f}")
+                            logging.info(f"[RESULT] WIN (+${profit:.2f}). Session Net PnL is still in drawdown (${session_net_pnl:.2f}). Total Net PnL: ${total_net_pnl:.2f}. RETAINING FLIP STAKE AT CEILING: ${current_stake:.2f}")
                         else:
                             current_stake = BET_AMOUNT
-                            logging.info(f"[RESULT] WIN (+${profit:.2f}). Total Net PnL: ${total_net_pnl:.2f}. Resetting stake to base: ${BET_AMOUNT}")
+                            logging.info(f"[RESULT] WIN (+${profit:.2f}). Session Net PnL recovered: ${session_net_pnl:.2f}. Total Net PnL: ${total_net_pnl:.2f}. Resetting stake to base: ${BET_AMOUNT}")
                             
                         actual_signal = "1" if contract.get('contract_type') == "PUT" else "0"
                     else:
-                        # Calculate next step magnitude up
                         next_calculated_martingale = current_stake * MARTINGALE_MULTIPLIER
                         
-                        # Enforce hard upper boundary protection limit at 142
                         if next_calculated_martingale >= MAX_STAKE_CEILING or current_stake >= MAX_STAKE_CEILING:
                             current_stake = MAX_STAKE_CEILING
-                            logging.info(f"[RESULT] LOSS (${profit:.2f}). Total Net PnL: ${total_net_pnl:.2f}. MAX RISK LIMIT MET. STAKE BOUNDED AT HARD CEILING: ${current_stake:.2f}")
+                            logging.info(f"[RESULT] LOSS (${profit:.2f}). Session Net PnL: ${session_net_pnl:.2f}. Total Net PnL: ${total_net_pnl:.2f}. CEILING MET. Next entry locked at: ${current_stake:.2f}")
                         else:
                             current_stake = next_calculated_martingale
-                            logging.info(f"[RESULT] LOSS (${profit:.2f}). Total Net PnL: ${total_net_pnl:.2f}. Martingale stake scaled up to: ${current_stake:.2f}")
+                            logging.info(f"[RESULT] LOSS (${profit:.2f}). Session Net PnL: ${session_net_pnl:.2f}. Total Net PnL: ${total_net_pnl:.2f}. Martingale stake scaled up to: ${current_stake:.2f}")
                         
                         loss_magnitude = abs(profit)
                         if loss_magnitude > max_historical_loss:
@@ -346,6 +348,7 @@ async def check_last_trade_result(websocket):
                     
                     last_pattern += signal_flag
                     actual_last_pattern += actual_signal
+                    
                     last_contract_id = None 
                 break
     except Exception as e:
@@ -418,8 +421,14 @@ async def process_ticks(websocket):
                 if last_contract_id:
                     await check_last_trade_result(websocket)
                 elif active_prediction is not None:
-                    trade_direction = "CALL" if active_prediction == 0 else "PUT"
-                    logging.info(f"[SIGNAL] Executing trade from Prediction Matrix logic value: -> {trade_direction}")
+                    if current_stake >= MAX_STAKE_CEILING:
+                        crypto_rand_int = secrets.randbelow(2)
+                        trade_direction = "CALL" if crypto_rand_int == 0 else "PUT"
+                        logging.info(f"[SIGNAL] Max Martingale Ceil Active. Crypto randomInt matching node behavior -> {trade_direction}")
+                    else:
+                        trade_direction = "CALL" if active_prediction == 0 else "PUT"
+                        logging.info(f"[SIGNAL] Executing trade from Prediction Matrix logic value -> {trade_direction}")
+                        
                     last_contract_id = await execute_trade(websocket, trade_direction, current_stake)
 
             elif payload.get('msg_type') == 'transaction' and 'transaction' in payload:
