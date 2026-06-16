@@ -9,6 +9,7 @@ build/
 dist/
 data/
 dukascopy-binary-options-algo/
+telegramalgo/
 
 # Editor backup files
 *~
