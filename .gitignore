@@ -7,6 +7,8 @@ __pycache__/
 .Python
 build/
 dist/
+data/
+dukascopy-binary-options-algo/
 
 # Editor backup files
 *~

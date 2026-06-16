@@ -10,7 +10,7 @@ const { randomInt } = require('crypto');
 const app_id           = '32WzmZD0GdX5NdJKlPO7e';
 const api_token        = 'pat_bc78db629feabf69a853ede8323ef15e2b35301f4af90273bfdd0c380edddda1';
 const deriv_account_id = 'ROT91151098';
-const BET_AMOUNT        = 1;
+const BET_AMOUNT        = 0.15;
 
 //const api_token = 'pat_e20186217b7a6fe596656cb50430f440b88a30bbb9f83760dc86ec451117a6f1';
 //const deriv_account_id = 'DOT90416964'
@@ -113,7 +113,7 @@ async function executeTrade(symbol, direction, stake) {
         amount: parseFloat(stake.toFixed(2)),
         basis: 'stake',
         contract_type: direction,
-        currency: 'USD',
+        currency: 'TRX',
         duration: TICK_DURATION,
         duration_unit: 't',
         underlying_symbol: symbol,
@@ -128,7 +128,7 @@ async function executeTrade(symbol, direction, stake) {
             amount: parseFloat(stake.toFixed(2)),
             basis: 'stake',
             contract_type: direction,
-            currency: 'USD',
+            currency: 'TRX',
             duration: TICK_DURATION,
             duration_unit: 't',
             underlying_symbol: symbol,
@@ -260,22 +260,24 @@ async function tradingCycle() {
                     if (actualLastPattern.length >= 2) {
                         const lastTwo = actualLastPattern.slice(-2);
                         if (lastTwo === '00') {
+                            //let randomIntNum = randomInt(0,1);
+                            //finalTradeDirection = randomIntNum === 0 ? "CALL" : "PUT";
                             finalTradeDirection = 'CALL';
                             console.log('[TRADE_DECISION] Overriding signal: 00 pattern -> CALL');
                         } else if (lastTwo === '01') {
                             let randomIntNum = randomInt(0,1);
                             finalTradeDirection = randomIntNum === 0 ? "CALL" : "PUT";
-                            //finalTradeDirection = 'CALL';
+                            finalTradeDirection = 'CALL';
                             console.log('[TRADE_DECISION] Overriding signal: 01 pattern -> PUT');
                         } else if (lastTwo === '11') {
-                            let randomIntNum = randomInt(0,1);
-                            finalTradeDirection = randomIntNum === 0 ? "CALL" : "PUT";
-                            //finalTradeDirection = 'PUT';
+                            //let randomIntNum = randomInt(0,1);
+                            //finalTradeDirection = randomIntNum === 0 ? "CALL" : "PUT";
+                            finalTradeDirection = 'PUT';
                             console.log('[TRADE_DECISION] Overriding signal: 11 pattern -> CALL');
                         } else if (lastTwo === '10') {
                             let randomIntNum = randomInt(0,1);
                             finalTradeDirection = randomIntNum === 0 ? "CALL" : "PUT";
-                            //finalTradeDirection = 'PUT';    
+                            // finalTradeDirection = 'PUT';    
                             console.log('[TRADE_DECISION] Overriding signal: 10 pattern -> CALL');
                         }
                     }
