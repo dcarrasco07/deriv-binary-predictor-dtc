@@ -6,243 +6,137 @@ import logging
 import requests
 import sqlite3
 import secrets
-from collections import deque
 import time
 
 # --- Configuration ---
 app_id = '32WzmZD0GdX5NdJKlPO7e'
-# api_token = 'pat_bc78db629feabf69a853ede8323ef15e2b35301f4af90273bfdd0c380edddda1'
-# deriv_account_id = 'ROT91151098'
-
 api_token = 'pat_e20186217b7a6fe596656cb50430f440b88a30bbb9f83760dc86ec451117a6f1'
 deriv_account_id = 'DOT90416964'
 
 APP_ID = os.getenv('DERIV_APP_ID', app_id) 
 API_TOKEN = os.getenv('DERIV_API_TOKEN', api_token) 
-
 DERIV_REST_OTP_URL = f"https://api.derivws.com/trading/v1/options/accounts/{deriv_account_id}/otp"
 
-# Risk Management & Martingale Settings from JS
+# Risk & Scaling Settings
+RISK_PERCENTAGE = 0.0001   # 0.01% of the total wallet account balance
 BET_AMOUNT = 0.35
+MARTINGALE_MULTIPLIER = 2.5     # Standard 2.5x Martingale scale step
+MAX_STAKE_CEILING = 100.00     # Hard maximum stake barrier limit allowed
+BASE_ENTRY_FLOOR = 0.35        # Deriv API absolute entry option floor
+PROFIT_SHAVE_RATE = 0.30       # Shaves off exactly 30% of clean wins
 CURRENCY = 'USD'
-MARTINGALE_MULTIPLIER = 2.5
-MAX_STAKE_CEILING = 142.0  # Hard upper boundary risk barrier
 TICK_DURATION = 1
 SYMBOL = 'R_100'  
-WINDOW_SIZES = range(2, 101) 
 
 # Storage Files
 os.makedirs('data', exist_ok=True)
 DB_FILE = os.path.join('data', 'predictor_data.db')
 MARKDOWN_SUMMARY_FILE = os.path.join('data', 'live_dashboard.md')
 
-# --- Logging Setup ---
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Shared Global Memory Spaces ---
-last_raw_tick = None
-windowed_movements = {}
-predictions_correct = {}
-pattern_stats = {}
-
-current_stake = BET_AMOUNT
 last_contract_id = None
-is_processing = False
-
-# JavaScript Pattern Memory Management Simulators
-last_pattern = "00"
-actual_last_pattern = "00"
-signal_flag = "0"
-actual_signal = "0"
-
-# --- Metrics Memory ---
 max_historical_loss = 0.0
-total_net_pnl = 0.0      # All-time running profile history from Database
-session_net_pnl = 0.0    # HARD RESET TO 0 ON STARTUP FOR MARTINGALE RISK LOOPS
+total_net_pnl = 0.0      
+session_net_pnl = 0.0    
+account_balance = 0.0        
+calculated_target_stake = BASE_ENTRY_FLOOR  
 
-# --- Database Core Setup ---
+# --- REBATE ARCHITECTURE COUNTERS ---
+session_rebate_pool = 0.0  
+all_time_rebate_pool = 0.0 
+
 def init_db():
-    """Initializes the persistent SQLite schema for tracking state."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+    cursor.execute('CREATE TABLE IF NOT EXISTS ticks (epoch INTEGER PRIMARY KEY, quote REAL)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS trade_results (id INTEGER PRIMARY KEY AUTOINCREMENT, contract_id INTEGER UNIQUE, profit_loss REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
     
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ticks (
-            epoch INTEGER PRIMARY KEY,
-            quote REAL
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pattern_records (
+        CREATE TABLE IF NOT EXISTS rebate_ledger (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            window_size INTEGER,
-            pattern_str TEXT,
-            result_str TEXT,
-            is_correct INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT,
-            action TEXT,
-            transaction_time INTEGER,
-            captured_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS trade_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            contract_id INTEGER UNIQUE,
-            profit_loss REAL,
+            action TEXT,          
+            amount REAL,          
+            contract_id INTEGER,  
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
     conn.close()
 
-# --- Rebuild State from SQLite on Crash Recovery ---
 def recover_state_from_db():
-    """Queries SQLite history to cleanly rebuild runtime movement matrices, historical loss thresholds, and total Net PnL."""
-    global last_raw_tick, windowed_movements, predictions_correct, pattern_stats, max_historical_loss, total_net_pnl, session_net_pnl, current_stake
-    
-    windowed_movements = {size: deque(maxlen=size) for size in WINDOW_SIZES}
-    predictions_correct = {size: {'correct': 0, 'total': 0} for size in WINDOW_SIZES}
-    pattern_stats = {size: {} for size in WINDOW_SIZES}
-    last_raw_tick = None
-
+    global max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    
     cursor.execute("SELECT MIN(profit_loss) FROM trade_results")
     row_loss = cursor.fetchone()
-    if row_loss and row_loss[0] is not None:
-        max_historical_loss = abs(row_loss[0])
-    else:
-        max_historical_loss = 0.0
-        
+    max_historical_loss = abs(row_loss[0]) if row_loss and row_loss[0] is not None else 0.0
+    
     cursor.execute("SELECT SUM(profit_loss) FROM trade_results")
     row_pnl = cursor.fetchone()
-    if row_pnl and row_pnl[0] is not None:
-        total_net_pnl = float(row_pnl[0])
-    else:
-        total_net_pnl = 0.0
+    total_net_pnl = float(row_pnl[0]) if row_pnl and row_pnl[0] is not None else 0.0
     
     cursor.execute('''
-        SELECT window_size, pattern_str, result_str, SUM(is_correct), COUNT(*) 
-        FROM pattern_records 
-        GROUP BY window_size, pattern_str, result_str
+        SELECT SUM(amount) FROM rebate_ledger WHERE action = 'CREDIT'
     ''')
-    for row in cursor.fetchall():
-        w_size, p_str, r_str, corrects, totals = row
-        predictions_correct[w_size]['correct'] += corrects
-        predictions_correct[w_size]['total'] += totals
-        pattern_stats[w_size][(p_str, r_str)] = {'correct': corrects, 'total': totals}
-        
-    cursor.execute("SELECT epoch, quote FROM ticks ORDER BY epoch DESC LIMIT 105")
-    historical_ticks = cursor.fetchall()[::-1]
-    
-    if historical_ticks:
-        for epoch, quote in historical_ticks:
-            current_tick = {'epoch': epoch, 'quote': quote}
-            if last_raw_tick is not None:
-                step_direction = '1' if current_tick['quote'] < last_raw_tick['quote'] else '0'
-                for size in WINDOW_SIZES:
-                    windowed_movements[size].append(step_direction)
-            last_raw_tick = current_tick
-            
+    row_pool = cursor.fetchone()
+    all_time_rebate_pool = float(row_pool[0]) if row_pool and row_pool[0] is not None else 0.0
     conn.close()
     
-    # Session Net PNL is intentionally left at 0.0 here to reset tracking on execution reboot
     session_net_pnl = 0.0
-    current_stake = BET_AMOUNT
-        
-    logging.info("Crash survival matrix fully restored. Session risk tracking engine set to $0.00 entry parameters.")
+    session_rebate_pool = 0.0
+    logging.info("Dynamic Offset Session Engine Online. Current Session Pool set to accumulation mode.")
 
-def get_authenticated_ws_url():
-    """Fetches WebSocket URL using the JS architecture logic pattern via REST."""
-    headers = {
-        "Deriv-App-ID": APP_ID,
-        "Authorization": f"Bearer {API_TOKEN}",
-        "Content-Type": "application/json"
-    }
+def log_rebate_ledger_entry(action, amount, contract_id=None):
     try:
-        logging.info("[BOT] Requesting authorized dynamic pipeline mapping...")
-        response = requests.post(DERIV_REST_OTP_URL, headers=headers, timeout=10)
-        logging.info(f"OTP Response Status: {response.status_code}")
-        if response.status_code == 200:
-            res_json = response.json()
-            logging.info(f"OTP Response Data: {res_json}")
-            ws_url = res_json.get('data', {}).get('url')
-            if ws_url:
-                return ws_url
+        db_conn = sqlite3.connect(DB_FILE)
+        db_cursor = db_conn.cursor()
+        db_cursor.execute('''
+            INSERT INTO rebate_ledger (action, amount, contract_id)
+            VALUES (?, ?, ?)
+        ''', (action, float(amount), contract_id))
+        db_conn.commit()
+        db_conn.close()
     except Exception as e:
-        logging.error(f"[BOT] Network error handling API proxy layout: {e}")
-    return None
+        logging.error(f"Failed to record transaction to ledger system: {e}")
 
-def make_prediction_from_movements(movement_window):
-    if len(movement_window) < 1:
-        return None
-    return 0 if movement_window[-1] == movement_window[0] else 1
+def calculate_base_percentage_stake():
+    global account_balance, session_rebate_pool
+    if account_balance <= 0:
+        return BASE_ENTRY_FLOOR
+    computed_base = (account_balance - session_rebate_pool) * RISK_PERCENTAGE * BET_AMOUNT
+    if computed_base < BASE_ENTRY_FLOOR:
+        return BASE_ENTRY_FLOOR
+    return round(computed_base, 2)
 
 def write_readable_markdown_summary(last_quote):
-    """Generates a highly readable markdown dashboard page from SQLite aggregation maps."""
-    global predictions_correct, pattern_stats, max_historical_loss, total_net_pnl, session_net_pnl, current_stake
+    global max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, account_balance
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-    
     try:
         with open(MARKDOWN_SUMMARY_FILE, 'w') as f:
-            f.write(f"# DERIV STRATEGY RUNTIME ENGINE DASHBOARD\n\n")
+            f.write(f"# DERIV OFFSET REBATE ACCUMULATION DASHBOARD\n\n")
             f.write(f"* **Last Update Sync**: `{timestamp}`\n")
-            f.write(f"* **Monitored Account**: `{deriv_account_id}`\n")
-            f.write(f"* **Active Asset Price**: `{last_quote}`\n")
-            f.write(f"* **Underlying Database Engine**: `{DB_FILE}`\n\n")
+            f.write(f"* **Active Asset Price**: `{last_quote}` (`{SYMBOL}`)\n\n")
             f.write(f"---\n\n")
             
-            f.write(f"## GLOBAL TRADING PERFORMANCE RISK ANALYSIS\n")
+            f.write(f"## ACTIVE RISK SHIELD AND OFFSET ANALYSIS\n")
+            f.write(f"* **Session Accumulating Rebate Pool**: `[ ${session_rebate_pool:.4f} {CURRENCY} ]` (Never Deducted)\n")
+            f.write(f"* **Raw Dynamic Target Size**: `${calculated_target_stake:.2f} {CURRENCY}`\n")
+            f.write(f"* **Final Dispatched Placed Stake**: **`${calculated_target_stake:.2f} {CURRENCY}`**\n")
+            f.write(f"* **All-Time Cumulative Rebate History**: `${all_time_rebate_pool:.4f} {CURRENCY}`\n\n")
+            
+            f.write(f"## FINANCIAL PERFORMANCE TRACKING OVERVIEW\n")
             pnl_sign = "+" if total_net_pnl >= 0 else ""
             session_sign = "+" if session_net_pnl >= 0 else ""
-            f.write(f"* **Total Net Profit/Loss (All-Time History)**: `{pnl_sign}${total_net_pnl:.2f} {CURRENCY}`\n")
             f.write(f"* **Current Session Net Profit/Loss**: `{session_sign}${session_net_pnl:.2f} {CURRENCY}`\n")
-            f.write(f"* **Largest Loss Encountered (All-Time)**: `-${max_historical_loss:.2f} {CURRENCY}`\n")
-            
-            exec_mode = "CRYPTO RANDOMINT FLIP MODE" if current_stake >= MAX_STAKE_CEILING else "PREDICTION MATRIX MODE"
-            f.write(f"* **Current Active Position Stake Target**: `${current_stake:.2f} {CURRENCY}` (`{exec_mode}`)\n\n")
-            f.write(f"---\n\n")
-            
-            for size in WINDOW_SIZES:
-                stats = predictions_correct[size]
-                total = stats['total']
-                if total == 0:
-                    continue
-                    
-                correct = stats['correct']
-                rate = (correct / total) * 100
-                
-                f.write(f"## WINDOW CONFIG SIZE: {size} (Prev Movements Count)\n")
-                f.write(f"* **Evaluations Cumulative**: {total}\n")
-                f.write(f"* **Successful Correct Hits**: {correct}\n")
-                f.write(f"* **Window Prediction Accuracy**: `{rate:.2f}%`\n\n")
-                f.write(f"### Pattern Sequencer Layouts Breakdown\n")
-                
-                size_patterns = pattern_stats[size]
-                for (pattern_str, result_str), p_stats in sorted(size_patterns.items()):
-                    p_total = p_stats['total']
-                    p_correct = p_stats['correct']
-                    p_rate = (p_correct / p_total) * 100
-                    
-                    f.write(f"* Pattern `{pattern_str}` (window) => `{result_str}` (result) -> Accuracy: **{p_rate:.2f}%** ({p_correct}/{p_total} hits)\n")
-                
-                f.write(f"\n---\n\n")
-            
+            f.write(f"* **Total Net Profit/Loss (All-Time)**: `{pnl_sign}${total_net_pnl:.2f} {CURRENCY}`\n")
+            f.write(f"* **Largest Single Loss Encountered**: `-${max_historical_loss:.2f} {CURRENCY}`\n\n")
+            f.write(f"---\n")
     except Exception as e:
-        logging.error(f"Error drawing down readable report markdown file: {e}")
+        logging.error(f"Error writing markdown summary: {e}")
 
 async def execute_trade(websocket, direction, stake):
-    """Executes proposal creation and purchase steps mapped precisely from the JS client logic."""
     try:
         proposal_req = {
             "proposal": 1,
@@ -255,235 +149,140 @@ async def execute_trade(websocket, direction, stake):
             "underlying_symbol": SYMBOL
         }
         await websocket.send(json.dumps(proposal_req))
-        
         async for message in websocket:
             res = json.loads(message)
             if res.get('msg_type') == 'proposal':
-                if 'error' in res:
-                    raise Exception(f"Proposal failed: {res['error']['message']}")
+                if 'error' in res: raise Exception(res['error']['message'])
                 proposal_id = res['proposal']['id']
                 break
         
-        buy_req = {
-            "buy": proposal_id,
-            "price": float(f"{stake:.2f}")
-        }
-        await websocket.send(json.dumps(buy_req))
-        
+        await websocket.send(json.dumps({"buy": proposal_id, "price": float(f"{stake:.2f}")}))
         async for message in websocket:
             res = json.loads(message)
             if res.get('msg_type') == 'buy':
-                if 'error' in res:
-                    if res['error'].get('code') == 'InsufficientBalance':
-                        logging.error("[BOT] Insufficient Balance. Resetting stake to initial BET_AMOUNT.")
-                        global current_stake
-                        current_stake = BET_AMOUNT
-                    raise Exception(f"Buy failed: {res['error']['message']}")
-                
+                if 'error' in res: raise Exception(res['error']['message'])
                 contract_id = res['buy']['contract_id']
-                logging.info(f"[TRADE] Placed {direction} | ID: {contract_id} | Stake: ${stake:.2f}")
+                logging.info(f"[TRADE] Dispatched Offset Position {direction} | ID: {contract_id} | Placed Stake: ${stake:.2f}")
+                
+                # --- FIXED: Establish an automatic push stream connection straight to the broker ---
+                await websocket.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
                 return contract_id
     except Exception as e:
-        logging.error(f"[BOT] Trade execution error: {e}")
+        logging.error(f"[BOT] Trade Request Blocked: {e}")
         return None
 
-async def check_last_trade_result(websocket):
-    """Determines winning loops, handles max-stake lock limits, and processes Martingale resets based on current run Session Net PnL."""
-    global last_contract_id, current_stake, signal_flag, actual_signal, last_pattern, actual_last_pattern, max_historical_loss, total_net_pnl, session_net_pnl, MARTINGALE_MULTIPLIER
-    if not last_contract_id:
+def handle_settlement_data(contract):
+    """Processes streamed contract packets pushed automatically via data feeds."""
+    global last_contract_id, max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake
+    
+    # Ignore open packets; wait for the final message package
+    if not contract or not contract.get('is_sold'): 
         return
 
-    try:
-        req = {"proposal_open_contract": 1, "contract_id": last_contract_id}
-        await websocket.send(json.dumps(req))
+    profit = float(contract.get('profit', 0))
+    contract_id = contract.get('contract_id')
+    
+    db_conn = sqlite3.connect(DB_FILE)
+    db_cursor = db_conn.cursor()
+    db_cursor.execute("INSERT OR IGNORE INTO trade_results (contract_id, profit_loss) VALUES (?, ?)", (contract_id, profit))
+    db_conn.commit()
+    db_conn.close()
+    
+    total_net_pnl += profit
+    session_net_pnl += profit
+    
+    session_sign = "+" if session_net_pnl >= 0 else ""
+    
+    if profit > 0:
+        shaved_allocation = profit * PROFIT_SHAVE_RATE
         
-        async for message in websocket:
-            res = json.loads(message)
-            if res.get('msg_type') == 'proposal_open_contract':
-                contract = res.get('proposal_open_contract')
-                if not contract:
-                    return
-                
-                signal_flag = "1" if contract.get('contract_type') == "PUT" else "0"
-                
-                if contract.get('is_sold'):
-                    profit = float(contract.get('profit', 0))
-                    
-                    db_conn = sqlite3.connect(DB_FILE)
-                    db_cursor = db_conn.cursor()
-                    db_cursor.execute("INSERT OR IGNORE INTO trade_results (contract_id, profit_loss) VALUES (?, ?)", (last_contract_id, profit))
-                    db_conn.commit()
-                    db_conn.close()
-                    
-                    # Accumulate statistics to both pipelines independently
-                    total_net_pnl += profit
-                    session_net_pnl += profit
-                    
-                    if profit > 0:
-                        # --- RISK ENGINE RISK RECOVERY EVALUATION ---
-                        # Uses 'session_net_pnl' to ensure logic is tracked "as you go" per server iteration instance
-                        if current_stake >= MAX_STAKE_CEILING and session_net_pnl <= 0:
-                            current_stake = MAX_STAKE_CEILING
-                            logging.info(f"[RESULT] WIN (+${profit:.2f}). Session Net PnL is still in drawdown (${session_net_pnl:.2f}). Total Net PnL: ${total_net_pnl:.2f}. RETAINING FLIP STAKE AT CEILING: ${current_stake:.2f}")
-                        else:
-                            current_stake = BET_AMOUNT
-                            logging.info(f"[RESULT] WIN (+${profit:.2f}). Session Net PnL recovered: ${session_net_pnl:.2f}. Total Net PnL: ${total_net_pnl:.2f}. Resetting stake to base: ${BET_AMOUNT}")
-                            
-                        actual_signal = "1" if contract.get('contract_type') == "PUT" else "0"
-                    else:
-                        next_calculated_martingale = current_stake * MARTINGALE_MULTIPLIER
-                        
-                        if next_calculated_martingale >= MAX_STAKE_CEILING or current_stake >= MAX_STAKE_CEILING:
-                            current_stake = MAX_STAKE_CEILING
-                            logging.info(f"[RESULT] LOSS (${profit:.2f}). Session Net PnL: ${session_net_pnl:.2f}. Total Net PnL: ${total_net_pnl:.2f}. CEILING MET. Next entry locked at: ${current_stake:.2f}")
-                        else:
-                            current_stake = next_calculated_martingale
-                            logging.info(f"[RESULT] LOSS (${profit:.2f}). Session Net PnL: ${session_net_pnl:.2f}. Total Net PnL: ${total_net_pnl:.2f}. Martingale stake scaled up to: ${current_stake:.2f}")
-                        
-                        loss_magnitude = abs(profit)
-                        if loss_magnitude > max_historical_loss:
-                            max_historical_loss = loss_magnitude
-                            
-                        actual_signal = "0" if contract.get('contract_type') == "PUT" else "1"
-                    
-                    last_pattern += signal_flag
-                    actual_last_pattern += actual_signal
-                    
-                    last_contract_id = None 
-                break
-    except Exception as e:
-        logging.error(f"[BOT] Error checking result framework: {e}")
+        session_rebate_pool += shaved_allocation
+        all_time_rebate_pool += shaved_allocation
+        
+        log_rebate_ledger_entry('CREDIT', shaved_allocation, contract_id)
+        
+        logging.info(f"[RESULT] WIN (+${profit:.2f}) | Session: {session_sign}${session_net_pnl:.2f} | Shaved 30% (+${shaved_allocation:.4f}) into Pool. Current Session Pool Total: ${session_rebate_pool:.4f}")
+        calculated_target_stake = calculate_base_percentage_stake()
+    else:
+        logging.info(f"[RESULT] LOSS (${profit:.2f}) | Session: {session_sign}${session_net_pnl:.2f}")
+        loss_magnitude = abs(profit)
+        if loss_magnitude > max_historical_loss:
+            max_historical_loss = loss_magnitude
+        
+        if calculated_target_stake >= MAX_STAKE_CEILING:
+            calculated_target_stake = calculate_base_percentage_stake()
+            logging.info(f"[CEILING RESET] Loss encountered at Max Ceiling. Hard resetting dynamic target back to baseline balance percentage: ${calculated_target_stake:.2f}")
+        else:
+            # --- FIXED: Multiply against previous base scale path cleanly ---
+            next_calculated_step = calculated_target_stake * MARTINGALE_MULTIPLIER
+            if next_calculated_step >= MAX_STAKE_CEILING:
+                calculated_target_stake = MAX_STAKE_CEILING
+                logging.warning(f"[CEILING MET] Scaling hit maximum threshold. Locking next trade target at ceiling: ${calculated_target_stake:.2f}")
+            else:
+                calculated_target_stake = round(next_calculated_step, 2)
+    
+    # Unlock pipeline for the next trade iteration
+    last_contract_id = None
 
 async def process_ticks(websocket):
-    global last_raw_tick, windowed_movements, predictions_correct, pattern_stats, last_contract_id, current_stake
+    global last_contract_id, calculated_target_stake, account_balance
 
     async for message in websocket:
         try:
             payload = json.loads(message)
-            stats_updated = False
-            active_prediction = None
             
-            if payload.get('msg_type') == 'tick' and 'tick' in payload:
-                tick_data = payload['tick']
-                current_tick = {
-                    'epoch': int(tick_data['epoch']),
-                    'quote': float(tick_data['quote'])
-                }
+            if 'balance' in payload:
+                account_balance = float(payload['balance']['balance'])
+                if not last_contract_id:
+                    calculated_target_stake = calculate_base_percentage_stake()
+            
+            # --- FIXED: Capture automated push stream packets instantly as they bypass the tick engine ---
+            elif payload.get('msg_type') == 'proposal_open_contract':
+                contract = payload.get('proposal_open_contract')
+                handle_settlement_data(contract)
+
+            elif payload.get('msg_type') == 'tick' and 'tick' in payload:
+                current_quote = float(payload['tick']['quote'])
+                write_readable_markdown_summary(current_quote)
                 
-                db_conn = sqlite3.connect(DB_FILE)
-                db_cursor = db_conn.cursor()
-                db_cursor.execute("INSERT OR IGNORE INTO ticks (epoch, quote) VALUES (?, ?)", (current_tick['epoch'], current_tick['quote']))
-
-                if last_raw_tick is not None:
-                    step_direction = '1' if current_tick['quote'] < last_raw_tick['quote'] else '0'
-
-                    for size in WINDOW_SIZES:
-                        window_deque = windowed_movements[size]
-                        
-                        if len(window_deque) == size:
-                            predicted_outcome = make_prediction_from_movements(window_deque)
-                            current_pattern = "".join(window_deque)
-                            actual_outcome = int(step_direction)
-
-                            if predicted_outcome is not None:
-                                active_prediction = predicted_outcome
-                                is_hit = (predicted_outcome == actual_outcome)
-                                result_str = str(actual_outcome)
-                                
-                                db_cursor.execute('''
-                                    INSERT INTO pattern_records (window_size, pattern_str, result_str, is_correct)
-                                    VALUES (?, ?, ?, ?)
-                                ''', (size, current_pattern, result_str, 1 if is_hit else 0))
-                                
-                                predictions_correct[size]['total'] += 1
-                                if is_hit:
-                                    predictions_correct[size]['correct'] += 1
-                                    
-                                stat_key = (current_pattern, result_str)
-                                if stat_key not in pattern_stats[size]:
-                                    pattern_stats[size][stat_key] = {'correct': 0, 'total': 0}
-                                pattern_stats[size][stat_key]['total'] += 1
-                                if is_hit:
-                                    pattern_stats[size][stat_key]['correct'] += 1
-                                    
-                                stats_updated = True
-
-                        window_deque.append(step_direction)
-
-                last_raw_tick = current_tick
-                db_conn.commit()
-                db_conn.close()
-                
-                if stats_updated:
-                    write_readable_markdown_summary(current_tick['quote'])
-                
-                # --- AUTOMATED LIVE TRADING EVALUATION SEQUENCE ---
-                if last_contract_id:
-                    await check_last_trade_result(websocket)
-                elif active_prediction is not None:
-                    if current_stake >= MAX_STAKE_CEILING:
-                        crypto_rand_int = secrets.randbelow(2)
-                        trade_direction = "CALL" if crypto_rand_int == 0 else "PUT"
-                        logging.info(f"[SIGNAL] Max Martingale Ceil Active. Crypto randomInt matching node behavior -> {trade_direction}")
-                    else:
-                        trade_direction = "CALL" if active_prediction == 0 else "PUT"
-                        logging.info(f"[SIGNAL] Executing trade from Prediction Matrix logic value -> {trade_direction}")
-                        
-                    last_contract_id = await execute_trade(websocket, trade_direction, current_stake)
-
-            elif payload.get('msg_type') == 'transaction' and 'transaction' in payload:
-                t_data = payload['transaction']
-                db_conn = sqlite3.connect(DB_FILE)
-                db_cursor = db_conn.cursor()
-                db_cursor.execute('''
-                    INSERT INTO transactions (symbol, action, transaction_time)
-                    VALUES (?, ?, ?)
-                ''', (t_data.get('symbol'), t_data.get('action'), t_data.get('transaction_time')))
-                db_conn.commit()
-                db_conn.close()
-
+                if not last_contract_id:
+                    logging.info(f"[FUNDS ROUTER] Dispatching trade frame. Raw Target: ${calculated_target_stake:.2f}")
+                    for i in range(3000):
+                        trade_direction = secrets.choice(["CALL", "PUT"])
+                    last_contract_id = await execute_trade(websocket, trade_direction, calculated_target_stake)
+                    
         except Exception as e:
-            logging.error(f"Error processing packet frame: {e}")
+            logging.error(f"Error processing payload frame: {e}")
+
+def get_authenticated_ws_url():
+    try:
+        response = requests.post(DERIV_REST_OTP_URL, headers={"Deriv-App-ID": APP_ID, "Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}, timeout=10)
+        if response.status_code == 200: return response.json().get('data', {}).get('url')
+    except Exception as e: logging.error(f"OTP rest failed: {e}")
+    return None
 
 async def main():
-    retry_delay = 5
     init_db()
     recover_state_from_db()
-    
-    logging.info('[BOT] Starting bot...')
-    logging.info(f'[BOT] Running. Base stake: ${BET_AMOUNT} | Martingale Ceiling Max: ${MAX_STAKE_CEILING} | Duration: {TICK_DURATION} ticks')
-    
     while True:
-        authenticated_ws_url = get_authenticated_ws_url()
-        if not authenticated_ws_url:
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60)
-            continue 
-
+        url = get_authenticated_ws_url()
+        if not url: await asyncio.sleep(5); continue
         try:
-            async with websockets.connect(authenticated_ws_url) as websocket:
-                auth_packet = {"authorize": API_TOKEN}
-                await websocket.send(json.dumps(auth_packet))
-                
-                async for message in websocket:
-                    auth_res = json.loads(message)
-                    if auth_res.get('msg_type') == 'authorize':
-                        if 'error' in auth_res:
-                            raise Exception(f"Authorization Rejected: {auth_res['error']['message']}")
-                        logging.info("[BOT] Connected, Authorized, and Subscribed to ticks.")
+            async with websockets.connect(url) as ws:
+                await ws.send(json.dumps({"authorize": API_TOKEN}))
+                async for msg in ws:
+                    auth_res = json.loads(msg)
+                    if auth_res.get('msg_type') == 'authorize': 
+                        global account_balance
+                        account_balance = float(auth_res['authorize']['balance'])
                         break
                 
-                retry_delay = 5
-                await websocket.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
-                await websocket.send(json.dumps({"transaction": 1, "subscribe": 1}))
-                await process_ticks(websocket) 
+                await ws.send(json.dumps({"balance": 1, "subscribe": 1}))
+                await ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+                await process_ticks(ws)
         except Exception as e:
-            logging.error(f"WebSocket interface execution error: {e}")
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60)
+            logging.error(f"Interface connection lost: {e}"); await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("System gracefully halted.")
+    try: asyncio.run(main())
+    except KeyboardInterrupt: logging.info("System gracefully halted.")
