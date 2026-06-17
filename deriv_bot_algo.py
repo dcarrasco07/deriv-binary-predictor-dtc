@@ -215,11 +215,7 @@ def handle_settlement_data(contract):
         else:
             # --- FIXED: Multiply against previous base scale path cleanly ---
             next_calculated_step = calculated_target_stake * MARTINGALE_MULTIPLIER
-            if next_calculated_step >= MAX_STAKE_CEILING:
-                calculated_target_stake = MAX_STAKE_CEILING
-                logging.warning(f"[CEILING MET] Scaling hit maximum threshold. Locking next trade target at ceiling: ${calculated_target_stake:.2f}")
-            else:
-                calculated_target_stake = round(next_calculated_step, 2)
+            calculated_target_stake = round(next_calculated_step, 2)
     
     # Unlock pipeline for the next trade iteration
     last_contract_id = None
