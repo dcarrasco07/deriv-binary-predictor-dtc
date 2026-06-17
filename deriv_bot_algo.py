@@ -247,8 +247,8 @@ async def process_ticks(websocket):
                 
                 if not last_contract_id:
                     logging.info(f"[FUNDS ROUTER] Dispatching trade frame. Raw Target: ${calculated_target_stake:.2f}")
-                    for i in range(3000):
-                        trade_direction = secrets.choice(["CALL", "PUT"])
+                    
+                    trade_direction = "CALL"
                     last_contract_id = await execute_trade(websocket, trade_direction, calculated_target_stake)
                     
         except Exception as e:
