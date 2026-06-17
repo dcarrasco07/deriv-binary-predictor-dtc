@@ -191,7 +191,7 @@ def handle_settlement_data(contract):
     total_net_pnl += profit - session_rebate_pool
     session_net_pnl += profit - session_rebate_pool
     
-    session_sign = "+" if session_net_pnl >= 0 else ""
+    session_sign = "+" if profit >= 0 else ""
     
     if profit > 0:
         shaved_allocation = profit * PROFIT_SHAVE_RATE
