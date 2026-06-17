@@ -209,13 +209,8 @@ def handle_settlement_data(contract):
         if loss_magnitude > max_historical_loss:
             max_historical_loss = loss_magnitude
         
-        if calculated_target_stake >= MAX_STAKE_CEILING:
-            calculated_target_stake = calculate_base_percentage_stake()
-            logging.info(f"[CEILING RESET] Loss encountered at Max Ceiling. Hard resetting dynamic target back to baseline balance percentage: ${calculated_target_stake:.2f}")
-        else:
-            # --- FIXED: Multiply against previous base scale path cleanly ---
-            next_calculated_step = calculated_target_stake * MARTINGALE_MULTIPLIER
-            calculated_target_stake = round(next_calculated_step, 2)
+        next_calculated_step = calculated_target_stake * MARTINGALE_MULTIPLIER
+        calculated_target_stake = round(next_calculated_step, 2)
     
     # Unlock pipeline for the next trade iteration
     last_contract_id = None
