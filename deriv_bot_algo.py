@@ -188,8 +188,8 @@ def handle_settlement_data(contract):
     db_conn.commit()
     db_conn.close()
     
-    total_net_pnl += profit
-    session_net_pnl += profit
+    total_net_pnl += profit - session_rebate_pool
+    session_net_pnl += profit - session_rebate_pool
     
     session_sign = "+" if session_net_pnl >= 0 else ""
     
