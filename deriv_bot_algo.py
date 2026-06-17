@@ -201,10 +201,10 @@ def handle_settlement_data(contract):
         
         log_rebate_ledger_entry('CREDIT', shaved_allocation, contract_id)
         
-        logging.info(f"[RESULT] WIN (+${profit:.2f}) | Session: {session_sign}${session_net_pnl:.2f} | Shaved 30% (+${shaved_allocation:.4f}) into Pool. Current Session Pool Total: ${session_rebate_pool:.4f}")
+        logging.info(f"[RESULT] WIN (+${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Shaved 30% (+${shaved_allocation:.4f}) into Pool. Current Session Pool Total: ${session_rebate_pool:.4f}")
         calculated_target_stake = calculate_base_percentage_stake()
     else:
-        logging.info(f"[RESULT] LOSS (${profit:.2f}) | Session: {session_sign}${session_net_pnl:.2f}")
+        logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f}")
         loss_magnitude = abs(profit)
         if loss_magnitude > max_historical_loss:
             max_historical_loss = loss_magnitude
