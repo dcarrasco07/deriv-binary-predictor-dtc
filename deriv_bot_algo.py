@@ -1,9 +1,11 @@
 import asyncio
 import json
 import os
+import queue
 import websockets
 import logging
 import requests
+import secrets
 
 # --- Configuration ---
 app_id = '32WzmZD0GdX5NdJKlPO7e'
@@ -22,7 +24,7 @@ MARTINGALE_MULTIPLIER = 2.5
 PROFIT_SHAVE_RATE = 1       # Shaves off exactly 30% of clean wins
 CURRENCY = 'USD'
 TICK_DURATION = 1
-SYMBOL = 'R_100'  
+SYMBOL = 'frxEURUSD'  
 
 # Storage Files
 os.makedirs('data', exist_ok=True)
@@ -41,7 +43,8 @@ calculated_target_stake = BASE_ENTRY_FLOOR
 
 # --- REBATE ARCHITECTURE COUNTERS ---
 session_rebate_pool = 0.0  
-all_time_rebate_pool = 0.0 
+all_time_rebate_pool = 0.0
+window_queue = ""
 
 def calculate_base_percentage_stake():
     global account_balance, session_rebate_pool
@@ -87,11 +90,15 @@ async def execute_trade(websocket, direction, stake):
 
 def handle_settlement_data(contract):
     """Processes streamed contract packets pushed automatically via data feeds."""
-    global last_contract_id, max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake
+    global last_contract_id, max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, window_queue
     
     # Ignore open packets; wait for the final message package
     if not contract or not contract.get('is_sold'): 
         return
+
+    contract_type_value = "0" if contact.get('contract_type') == "PUT" else "1"
+    window_queue += contract_type_value
+    window_queue = window_queue[:2]
 
     profit = float(contract.get('profit', 0))
     
@@ -123,7 +130,7 @@ def handle_settlement_data(contract):
     last_contract_id = None
 
 async def process_ticks(websocket):
-    global last_contract_id, calculated_target_stake, account_balance
+    global last_contract_id, calculated_target_stake, account_balance, window_queue
 
     async for message in websocket:
         try:
@@ -145,15 +152,16 @@ async def process_ticks(websocket):
                 if not last_contract_id:
                     logging.info(f"[FUNDS ROUTER] Dispatching trade frame. Raw Target: ${calculated_target_stake:.2f}")
                     
-                    trade_direction = "CALL"
-                    last_contract_id = await execute_trade(websocket, trade_direction, calculated_target_stake)
+                    if window_queue == "00":
+                        trade_direction = secrets.choice(["PUT", "CALL"])
+                        last_contract_id = await execute_trade(websocket, trade_direction, calculated_target_stake)
                     
         except Exception as e:
             logging.error(f"Error processing payload frame: {e}")
 
 def get_authenticated_ws_url():
     try:
-        response = requests.post(DERIV_REST_OTP_URL, headers={"Deriv-App-ID": APP_ID, "Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}, timeout=30)
+        response = requests.post(DERIV_REST_OTP_URL, headers={"Deriv-App-ID": APP_ID, "Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}, timeout=10)
         if response.status_code == 200: return response.json().get('data', {}).get('url')
     except Exception as e: logging.error(f"OTP rest failed: {e}")
     return None
@@ -173,7 +181,7 @@ async def main():
                         break
                 
                 await ws.send(json.dumps({"balance": 1, "subscribe": 1}))
-                await ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+                # await ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
                 await process_ticks(ws)
         except Exception as e:
             logging.error(f"Interface connection lost: {e}"); await asyncio.sleep(5)
