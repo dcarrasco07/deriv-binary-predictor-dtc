@@ -188,8 +188,8 @@ def handle_settlement_data(contract):
     db_conn.commit()
     db_conn.close()
     
-    total_net_pnl += profit - session_rebate_pool
-    session_net_pnl += profit - session_rebate_pool
+    total_net_pnl += profit
+    session_net_pnl += profit
     
     session_sign = "+" if profit >= 0 else ""
     
@@ -201,10 +201,10 @@ def handle_settlement_data(contract):
         
         log_rebate_ledger_entry('CREDIT', shaved_allocation, contract_id)
         
-        logging.info(f"[RESULT] WIN (+${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Shaved 30% (+${shaved_allocation:.4f}) into Pool. Current Session Pool Total: ${session_rebate_pool:.4f}")
+        logging.info(f"[RESULT] WIN (+${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} | Shaved 30% (+${shaved_allocation:.4f}) into Pool.")
         calculated_target_stake = calculate_base_percentage_stake()
     else:
-        logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f}")
+        logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} ")
         loss_magnitude = abs(profit)
         if loss_magnitude > max_historical_loss:
             max_historical_loss = loss_magnitude
