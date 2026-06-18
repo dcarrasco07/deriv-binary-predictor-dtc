@@ -24,7 +24,7 @@ MARTINGALE_MULTIPLIER = 2.5
 PROFIT_SHAVE_RATE = 1       # Shaves off exactly 30% of clean wins
 CURRENCY = 'USD'
 TICK_DURATION = 1
-SYMBOL = 'frxEURUSD'  
+SYMBOL = 'R_100'  
 
 # Storage Files
 os.makedirs('data', exist_ok=True)
