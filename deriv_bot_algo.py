@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import queue
 import websockets
 import logging
 import requests
@@ -21,7 +20,7 @@ RISK_PERCENTAGE = 0.0001   # 0.01% of the total wallet account balance
 BET_AMOUNT = 0.35
 BASE_ENTRY_FLOOR = 0.35        # Deriv API absolute entry option floor
 MARTINGALE_MULTIPLIER = 2.5
-PROFIT_SHAVE_RATE = 1       # Shaves off exactly 30% of clean wins
+PROFIT_SHAVE_RATE = 1       # Shaves off exactly 100% of clean wins as configured
 CURRENCY = 'USD'
 TICK_DURATION = 1
 SYMBOL = 'R_100'  
@@ -96,9 +95,12 @@ def handle_settlement_data(contract):
     if not contract or not contract.get('is_sold'): 
         return
 
-    contract_type_value = "0" if contact.get('contract_type') == "PUT" else "1"
+    contract_type_value = "0" if contract.get('contract_type') == "PUT" else "1"
     window_queue += contract_type_value
-    window_queue = window_queue[:2]
+    
+    # --- FIXED: Slice from the end (-2:) to look at the 2 most recent updates ---
+    if len(window_queue) > 2:
+        window_queue = window_queue[-2:]
 
     profit = float(contract.get('profit', 0))
     
@@ -113,7 +115,7 @@ def handle_settlement_data(contract):
         session_rebate_pool += shaved_allocation
         all_time_rebate_pool += shaved_allocation
                 
-        logging.info(f"[RESULT] WIN (+${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} | Shaved 30% (+${shaved_allocation:.4f}) into Pool.")
+        logging.info(f"[RESULT] WIN (+${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} | Shaved 100% into Pool.")
         calculated_target_stake = calculate_base_percentage_stake()
     else:
         logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} ")
@@ -141,7 +143,6 @@ async def process_ticks(websocket):
                 if not last_contract_id:
                     calculated_target_stake = calculate_base_percentage_stake()
             
-            # --- FIXED: Capture automated push stream packets instantly as they bypass the tick engine ---
             elif payload.get('msg_type') == 'proposal_open_contract':
                 contract = payload.get('proposal_open_contract')
                 handle_settlement_data(contract)
@@ -150,9 +151,9 @@ async def process_ticks(websocket):
                 current_quote = float(payload['tick']['quote'])
                 
                 if not last_contract_id:
-                    logging.info(f"[FUNDS ROUTER] Dispatching trade frame. Raw Target: ${calculated_target_stake:.2f}")
-                    
-                    if window_queue == "00":
+                    # --- FIXED: Allow execution if the queue is building up ("") or if it hits target match rules ---
+                    if window_queue == "" or window_queue == "00":
+                        logging.info(f"[FUNDS ROUTER] Dispatching trade frame. Queue State: '{window_queue}' | Raw Target: ${calculated_target_stake:.2f}")
                         trade_direction = secrets.choice(["PUT", "CALL"])
                         last_contract_id = await execute_trade(websocket, trade_direction, calculated_target_stake)
                     
@@ -181,7 +182,7 @@ async def main():
                         break
                 
                 await ws.send(json.dumps({"balance": 1, "subscribe": 1}))
-                # await ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+                await ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
                 await process_ticks(ws)
         except Exception as e:
             logging.error(f"Interface connection lost: {e}"); await asyncio.sleep(5)
