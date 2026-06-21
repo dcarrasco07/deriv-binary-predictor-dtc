@@ -7,7 +7,7 @@ import requests
 import secrets
 
 # --- Configuration ---
-app_id = '32WzmZD0GdX5NdJKlPO7e'
+app_id = '33C4vGAjJZRb5JW73usCd'
 api_token = 'pat_e20186217b7a6fe596656cb50430f440b88a30bbb9f83760dc86ec451117a6f1'
 deriv_account_id = 'DOT90416964'
 
@@ -160,16 +160,49 @@ async def process_ticks(websocket):
         except Exception as e:
             logging.error(f"Error processing payload frame: {e}")
 
-def get_authenticated_ws_url():
-    try:
-        response = requests.post(DERIV_REST_OTP_URL, headers={"Deriv-App-ID": APP_ID, "Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}, timeout=10)
-        if response.status_code == 200: return response.json().get('data', {}).get('url')
-    except Exception as e: logging.error(f"OTP rest failed: {e}")
-    return None
+# def get_authenticated_ws_url():
+#     try:
+#         response = requests.post(DERIV_REST_OTP_URL, headers={"Deriv-App-ID": APP_ID, "Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}, timeout=10)
+#         if response.status_code == 200: return response.json().get('data', {}).get('url')
+#     except Exception as e: logging.error(f"OTP rest failed: {e}")
+#     return None
+
+async def get_authenticated_ws_url() -> str:
+    """Queries the modern REST API to get a dynamic authenticated WebSocket URL."""
+    url = f"https://api.derivws.com/trading/v1/options/accounts/{deriv_account_id}/otp"
+    
+    # FIXED: Both Deriv-App-ID AND Authorization must exist in tandem
+    headers = {
+        "Deriv-App-ID": app_id,
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json"
+    }
+    
+    while True:
+        try:
+            loop = asyncio.get_running_loop()
+            # Run synchronous post inside executor to preserve the asyncio loop
+            response = await loop.run_in_executor(
+                None, lambda: requests.post(url, headers=headers, timeout=10)
+            )
+            
+            if response.status_code == 200:
+                target_url = response.json().get('data', {}).get('url')
+                if target_url:
+                    return target_url
+            else:
+                print(f"Deriv Bot Meta: REST Error {response.status_code} - {response.text}")
+        except requests.exceptions.Timeout:
+            print("Deriv Bot Meta: HTTP Request timed out (Server dropped connection).")
+        except Exception as e:
+            print(f"Deriv Bot Meta: Failed to fetch dynamic REST OTP: {e}")
+        
+        print("Deriv Bot Meta: Retrying OTP token acquisition in 5 seconds...")
+        await asyncio.sleep(5)
 
 async def main():
     while True:
-        url = get_authenticated_ws_url()
+        url = await get_authenticated_ws_url()
         if not url: await asyncio.sleep(5); continue
         try:
             async with websockets.connect(url) as ws:
