@@ -7,7 +7,7 @@ import requests
 import secrets
 
 # --- Configuration ---
-app_id = '33C4vGAjJZRb5JW73usCd'
+app_id = '32WzmZD0GdX5NdJKlPO7e'
 api_token = 'pat_e20186217b7a6fe596656cb50430f440b88a30bbb9f83760dc86ec451117a6f1'
 deriv_account_id = 'DOT90416964'
 
@@ -64,7 +64,7 @@ async def execute_trade(websocket, direction, stake):
             "duration_unit": "t",
             "underlying_symbol": SYMBOL
         }
-        await websocket.send(json.dumps(proposal_req))
+        await send_data_safe(websocket, json.dumps(proposal_req))
         async for message in websocket:
             res = json.loads(message)
             if res.get('msg_type') == 'proposal':
@@ -72,7 +72,7 @@ async def execute_trade(websocket, direction, stake):
                 proposal_id = res['proposal']['id']
                 break
         
-        await websocket.send(json.dumps({"buy": proposal_id, "price": float(f"{stake:.2f}")}))
+        await send_data_safe(websocket,json.dumps({"buy": proposal_id, "price": float(f"{stake:.2f}")}))
         async for message in websocket:
             res = json.loads(message)
             if res.get('msg_type') == 'buy':
@@ -81,55 +81,71 @@ async def execute_trade(websocket, direction, stake):
                 logging.info(f"[TRADE] Dispatched Offset Position {direction} | ID: {contract_id} | Placed Stake: ${stake:.2f}")
                 
                 # --- FIXED: Establish an automatic push stream connection straight to the broker ---
-                await websocket.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
+                await send_data_safe(websocket,json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
                 return contract_id
     except Exception as e:
         logging.error(f"[BOT] Trade Request Blocked: {e}")
         return None
 
+async def send_data_safe(websocket, payload):
+    # Get the underlying asyncio transport layer object
+    transport = websocket.transport
+    
+    if transport is not None:
+        # Check current memory buffer size in bytes (1 MB threshold)
+        if transport.get_write_buffer_size() > 1024 * 1024:
+            logging.warning("Network congestion detected. Throttling payload.")
+            return # Drop or defer the packet here
+            
+    # Regular non-blocking queueing, blocks only if TCP buffer is completely stuck
+    await websocket.send(payload)
+
 def handle_settlement_data(contract):
-    """Processes streamed contract packets pushed automatically via data feeds."""
-    global last_contract_id, max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, window_queue
-    
-    # Ignore open packets; wait for the final message package
-    if not contract or not contract.get('is_sold'): 
-        return
-
-    contract_type_value = "0" if contract.get('contract_type') == "PUT" else "1"
-    window_queue += contract_type_value
-    
-    # --- FIXED: Slice from the end (-2:) to look at the 2 most recent updates ---
-    if len(window_queue) > 2:
-        window_queue = window_queue[-2:]
-
-    profit = float(contract.get('profit', 0))
-    
-    total_net_pnl += profit
-    session_net_pnl += profit
-    
-    session_sign = "+" if profit >= 0 else ""
-    
-    if profit > 0:
-        shaved_allocation = profit * PROFIT_SHAVE_RATE
+    try: 
+        """Processes streamed contract packets pushed automatically via data feeds."""
+        global last_contract_id, max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, window_queue
         
-        session_rebate_pool += shaved_allocation
-        all_time_rebate_pool += shaved_allocation
-                
-        logging.info(f"[RESULT] WIN (+${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} | Shaved 100% into Pool.")
-        calculated_target_stake = calculate_base_percentage_stake()
-    else:
-        logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} ")
+        # Ignore open packets; wait for the final message package
+        if not contract or not contract.get('is_sold'): 
+            return
+
+        contract_type_value = "0" if contract.get('contract_type') == "PUT" else "1"
+        window_queue += contract_type_value
         
-        martingale = abs(profit) / BASE_ENTRY_FLOOR
-        calculated_target_stake = calculate_base_percentage_stake()
+        # --- FIXED: Slice from the end (-2:) to look at the 2 most recent updates ---
+        if len(window_queue) > 2:
+            window_queue = window_queue[-2:]
 
-        calculated_target_stake = calculated_target_stake * martingale * MARTINGALE_MULTIPLIER
-        calculated_target_stake = round(calculated_target_stake, 2)
+        profit = float(contract.get('profit', 0))
+        
+        total_net_pnl += profit
+        session_net_pnl += profit
+        
+        session_sign = "+" if profit >= 0 else ""
+        
+        if profit > 0:
+            shaved_allocation = profit * PROFIT_SHAVE_RATE
+            
+            session_rebate_pool += shaved_allocation
+            all_time_rebate_pool += shaved_allocation
+                    
+            logging.info(f"[RESULT] WIN (+${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} | Shaved 100% into Pool.")
+            calculated_target_stake = calculate_base_percentage_stake()
+        else:
+            logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} ")
+            
+            martingale = abs(profit) / BASE_ENTRY_FLOOR
+            calculated_target_stake = calculate_base_percentage_stake()
 
-    logging.info("[TOTAL NET PNL] VALUE: %s", total_net_pnl)
-    
-    # Unlock pipeline for the next trade iteration
-    last_contract_id = None
+            calculated_target_stake = calculated_target_stake * martingale * MARTINGALE_MULTIPLIER
+            calculated_target_stake = round(calculated_target_stake, 2)
+
+        logging.info("[TOTAL NET PNL] VALUE: %s", total_net_pnl)
+        
+        # Unlock pipeline for the next trade iteration
+        last_contract_id = None
+    except Exception as e:
+            logging.error(f"handle settlement data: {e}")
 
 async def process_ticks(websocket):
     global last_contract_id, calculated_target_stake, account_balance, window_queue
@@ -152,10 +168,9 @@ async def process_ticks(websocket):
                 
                 if not last_contract_id:
                     # --- FIXED: Allow execution if the queue is building up ("") or if it hits target match rules ---
-                    if window_queue == "" or window_queue == "00":
-                        logging.info(f"[FUNDS ROUTER] Dispatching trade frame. Queue State: '{window_queue}' | Raw Target: ${calculated_target_stake:.2f}")
-                        trade_direction = secrets.choice(["PUT", "CALL"])
-                        last_contract_id = await execute_trade(websocket, trade_direction, calculated_target_stake)
+                    logging.info(f"[FUNDS ROUTER] Dispatching trade frame. Queue State: '{window_queue}' | Raw Target: ${calculated_target_stake:.2f}")
+                    trade_direction = secrets.choice(["PUT", "CALL"])
+                    last_contract_id = await execute_trade(websocket, trade_direction, calculated_target_stake)
                     
         except Exception as e:
             logging.error(f"Error processing payload frame: {e}")
@@ -178,32 +193,30 @@ async def get_authenticated_ws_url() -> str:
         "Content-Type": "application/json"
     }
     
-    while True:
-        try:
-            loop = asyncio.get_running_loop()
-            # Run synchronous post inside executor to preserve the asyncio loop
-            response = await loop.run_in_executor(
-                None, lambda: requests.post(url, headers=headers, timeout=10)
-            )
-            
-            if response.status_code == 200:
-                target_url = response.json().get('data', {}).get('url')
-                if target_url:
-                    return target_url
-            else:
-                print(f"Deriv Bot Meta: REST Error {response.status_code} - {response.text}")
-        except requests.exceptions.Timeout:
-            print("Deriv Bot Meta: HTTP Request timed out (Server dropped connection).")
-        except Exception as e:
-            print(f"Deriv Bot Meta: Failed to fetch dynamic REST OTP: {e}")
+    try:
+        loop = asyncio.get_running_loop()
+        # Run synchronous post inside executor to preserve the asyncio loop
+        response = await loop.run_in_executor(
+            None, lambda: requests.post(url, headers=headers, timeout=10)
+        )
         
-        print("Deriv Bot Meta: Retrying OTP token acquisition in 5 seconds...")
-        await asyncio.sleep(5)
+        if response.status_code == 200:
+            target_url = response.json().get('data', {}).get('url')
+            if target_url:
+                return target_url
+        else:
+            print(f"Deriv Bot Meta: REST Error {response.status_code} - {response.text}")
+    except requests.exceptions.Timeout:
+        print("Deriv Bot Meta: HTTP Request timed out (Server dropped connection).")
+    except Exception as e:
+        print(f"Deriv Bot Meta: Failed to fetch dynamic REST OTP: {e}")
+    
+    print("Deriv Bot Meta: Retrying OTP token acquisition in 5 seconds...")
 
 async def main():
-    while True:
+    while True: 
         url = await get_authenticated_ws_url()
-        if not url: await asyncio.sleep(5); continue
+        if not url: await asyncio.sleep(0.05);
         try:
             async with websockets.connect(url) as ws:
                 await ws.send(json.dumps({"authorize": API_TOKEN}))
