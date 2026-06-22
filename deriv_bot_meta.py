@@ -190,7 +190,7 @@ class DerivBotMeta:
             timeout = 10
             start_time = time.time()
             while not self.is_connected and (time.time() - start_time) < timeout:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(5)
             
             if self.is_connected:
                 print("Deriv Bot Meta: Successfully connected to WebSocket.")
@@ -230,7 +230,7 @@ class DerivBotMeta:
             print("Deriv Bot Meta: Entering main loop.")
             try:
                 while self.is_connected:
-                    await asyncio.sleep(1) # Use asyncio.sleep for async context
+                    await asyncio.sleep(5) # Use asyncio.sleep for async context
             except KeyboardInterrupt:
                 print("Deriv Bot Meta: Execution aborted by user.")
             except Exception as e:
