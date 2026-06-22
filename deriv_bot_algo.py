@@ -16,14 +16,12 @@ API_TOKEN = os.getenv('DERIV_API_TOKEN', api_token)
 DERIV_REST_OTP_URL = f"https://api.derivws.com/trading/v1/options/accounts/{deriv_account_id}/otp"
 
 # Risk & Scaling Settings
+SUPPORTED_SYMBOLS = ['R_10', 'R_25', 'R_50', 'R_75', 'R_100']
 RISK_PERCENTAGE = 0.0001   # 0.01% of the total wallet account balance
-BET_AMOUNT = 0.35
 BASE_ENTRY_FLOOR = 0.35        # Deriv API absolute entry option floor
-MARTINGALE_MULTIPLIER = 2.5
+MARTINGALE_MULTIPLIER = 1
 PROFIT_SHAVE_RATE = 1       # Shaves off exactly 100% of clean wins as configured
 CURRENCY = 'USD'
-TICK_DURATION = 1
-SYMBOL = 'R_100'  
 
 # Storage Files
 os.makedirs('data', exist_ok=True)
@@ -43,26 +41,37 @@ calculated_target_stake = BASE_ENTRY_FLOOR
 # --- REBATE ARCHITECTURE COUNTERS ---
 session_rebate_pool = 0.0  
 all_time_rebate_pool = 0.0
-window_queue = ""
 
 def calculate_base_percentage_stake():
     global account_balance, session_rebate_pool
-    computed_base = (account_balance - session_rebate_pool) * RISK_PERCENTAGE * BET_AMOUNT
+    computed_base = (account_balance - session_rebate_pool) * RISK_PERCENTAGE * 2
     if computed_base < BASE_ENTRY_FLOOR:
         return BASE_ENTRY_FLOOR
     return round(computed_base, 2)
+
+def generate_random_choice_ticks():
+    return round(secrets.choice([secrets.SystemRandom().uniform(1, 4) for _ in range(4)]))
+
+def generate_random_choice_stake():
+    stake = secrets.SystemRandom().uniform(1, 2)
+    logging.info(f"stake: {stake}")
+    return stake
+
+def generate_random_choice_symbol():
+    return SUPPORTED_SYMBOLS[round(secrets.choice([secrets.SystemRandom().uniform(1, 4) for _ in range(4)]))]
+ 
 
 async def execute_trade(websocket, direction, stake):
     try:
         proposal_req = {
             "proposal": 1,
-            "amount": float(f"{stake:.2f}"),
+            "amount": float(f"{stake:2f}"),
             "basis": "stake",
             "contract_type": direction,
             "currency": CURRENCY,
-            "duration": TICK_DURATION,
+            "duration": generate_random_choice_ticks(),
             "duration_unit": "t",
-            "underlying_symbol": SYMBOL
+            "underlying_symbol": generate_random_choice_symbol()
         }
         await send_data_safe(websocket, json.dumps(proposal_req))
         async for message in websocket:
@@ -103,18 +112,11 @@ async def send_data_safe(websocket, payload):
 def handle_settlement_data(contract):
     try: 
         """Processes streamed contract packets pushed automatically via data feeds."""
-        global last_contract_id, max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, window_queue
+        global last_contract_id, max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake
         
         # Ignore open packets; wait for the final message package
         if not contract or not contract.get('is_sold'): 
             return
-
-        contract_type_value = "0" if contract.get('contract_type') == "PUT" else "1"
-        window_queue += contract_type_value
-        
-        # --- FIXED: Slice from the end (-2:) to look at the 2 most recent updates ---
-        if len(window_queue) > 2:
-            window_queue = window_queue[-2:]
 
         profit = float(contract.get('profit', 0))
         
@@ -133,12 +135,6 @@ def handle_settlement_data(contract):
             calculated_target_stake = calculate_base_percentage_stake()
         else:
             logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} ")
-            
-            martingale = abs(profit) / BASE_ENTRY_FLOOR
-            calculated_target_stake = calculate_base_percentage_stake()
-
-            calculated_target_stake = calculated_target_stake * martingale * MARTINGALE_MULTIPLIER
-            calculated_target_stake = round(calculated_target_stake, 2)
 
         logging.info("[TOTAL NET PNL] VALUE: %s", total_net_pnl)
         
@@ -148,7 +144,7 @@ def handle_settlement_data(contract):
             logging.error(f"handle settlement data: {e}")
 
 async def process_ticks(websocket):
-    global last_contract_id, calculated_target_stake, account_balance, window_queue
+    global last_contract_id, calculated_target_stake, account_balance
 
     async for message in websocket:
         try:
@@ -168,8 +164,9 @@ async def process_ticks(websocket):
                 
                 if not last_contract_id:
                     # --- FIXED: Allow execution if the queue is building up ("") or if it hits target match rules ---
-                    logging.info(f"[FUNDS ROUTER] Dispatching trade frame. Queue State: '{window_queue}' | Raw Target: ${calculated_target_stake:.2f}")
-                    trade_direction = secrets.choice(["PUT", "CALL"])
+                    logging.info(f"[FUNDS ROUTER] Dispatching trade frame. | Raw Target: ${calculated_target_stake:.2f}")
+                             
+                    trade_direction = secrets.SystemRandom().choice(["PUT", "CALL"])
                     last_contract_id = await execute_trade(websocket, trade_direction, calculated_target_stake)
                     
         except Exception as e:
@@ -216,7 +213,7 @@ async def get_authenticated_ws_url() -> str:
 async def main():
     while True: 
         url = await get_authenticated_ws_url()
-        if not url: await asyncio.sleep(0.05);
+        if not url: await asyncio.sleep(2)
         try:
             async with websockets.connect(url) as ws:
                 await ws.send(json.dumps({"authorize": API_TOKEN}))
@@ -228,7 +225,11 @@ async def main():
                         break
                 
                 await ws.send(json.dumps({"balance": 1, "subscribe": 1}))
-                await ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+                await ws.send(json.dumps({"ticks": "R_10", "subscribe": 1}))
+                await ws.send(json.dumps({"ticks": "R_25", "subscribe": 1}))
+                await ws.send(json.dumps({"ticks": "R_50", "subscribe": 1}))
+                await ws.send(json.dumps({"ticks": "R_75", "subscribe": 1}))
+                await ws.send(json.dumps({"ticks": "R_100", "subscribe": 1}))
                 await process_ticks(ws)
         except Exception as e:
             logging.error(f"Interface connection lost: {e}"); await asyncio.sleep(5)
