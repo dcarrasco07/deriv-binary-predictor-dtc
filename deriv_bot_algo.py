@@ -5,6 +5,7 @@ import websockets
 import logging
 import requests
 import random
+import secrets
 
 # --- Configuration ---
 app_id = '32WzmZD0GdX5NdJKlPO7e'
@@ -134,7 +135,7 @@ def handle_settlement_data(contract):
             logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} ")
             consecutive_losses += 1  # Increment consecutive losses on a loss
             if consecutive_losses <= 2:  # Apply martingale for first two losses
-                calculated_target_stake *= MARTINGALE_MULTIPLIER
+                calculated_target_stake = round(calculated_target_stake * MARTINGALE_MULTIPLIER, 2)
             else:  # After two consecutive losses, reset to base stake
                 calculated_target_stake = calculate_base_percentage_stake()
 
