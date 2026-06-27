@@ -53,7 +53,7 @@ def generate_random_choice_ticks():
     return round(secrets.choice([secrets.SystemRandom().uniform(1, 4) for _ in range(4)]))
 
 def generate_random_choice_stake():
-    stake = secrets.SystemRandom().uniform(1, 2)
+    stake = secrets.SystemRandom().uniform(1, 5)
     logging.info(f"stake: {stake}")
     return stake
 
