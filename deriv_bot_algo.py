@@ -4,7 +4,7 @@ import os
 import websockets
 import logging
 import requests
-import secrets
+import random
 
 # --- Configuration ---
 app_id = '32WzmZD0GdX5NdJKlPO7e'
@@ -37,6 +37,7 @@ total_net_pnl = 0.0
 session_net_pnl = 0.0    
 account_balance = 0.0        
 calculated_target_stake = BASE_ENTRY_FLOOR  
+consecutive_losses = 0  
 
 # --- REBATE ARCHITECTURE COUNTERS ---
 session_rebate_pool = 0.0  
@@ -51,11 +52,6 @@ def calculate_base_percentage_stake():
 
 def generate_random_choice_ticks():
     return round(secrets.choice([secrets.SystemRandom().uniform(1, 4) for _ in range(4)]))
-
-def generate_random_choice_stake():
-    stake = secrets.SystemRandom().uniform(1, 5)
-    logging.info(f"stake: {stake}")
-    return stake
 
 def generate_random_choice_symbol():
     return SUPPORTED_SYMBOLS[round(secrets.choice([secrets.SystemRandom().uniform(1, 4) for _ in range(4)]))]
@@ -112,7 +108,7 @@ async def send_data_safe(websocket, payload):
 def handle_settlement_data(contract):
     try: 
         """Processes streamed contract packets pushed automatically via data feeds."""
-        global last_contract_id, max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake
+        global last_contract_id, max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, consecutive_losses
         
         # Ignore open packets; wait for the final message package
         if not contract or not contract.get('is_sold'): 
@@ -133,9 +129,14 @@ def handle_settlement_data(contract):
                     
             logging.info(f"[RESULT] WIN (+${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} | Shaved 100% into Pool.")
             calculated_target_stake = calculate_base_percentage_stake()
+            consecutive_losses = 0  # Reset consecutive losses on a win
         else:
             logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} ")
-            calculated_target_stake *= MARTINGALE_MULTIPLIER
+            consecutive_losses += 1  # Increment consecutive losses on a loss
+            if consecutive_losses <= 2:  # Apply martingale for first two losses
+                calculated_target_stake *= MARTINGALE_MULTIPLIER
+            else:  # After two consecutive losses, reset to base stake
+                calculated_target_stake = calculate_base_percentage_stake()
 
         logging.info("[TOTAL NET PNL] VALUE: %s", total_net_pnl)
         
@@ -167,7 +168,7 @@ async def process_ticks(websocket):
                     # --- FIXED: Allow execution if the queue is building up ("") or if it hits target match rules ---
                     logging.info(f"[FUNDS ROUTER] Dispatching trade frame. | Raw Target: ${calculated_target_stake:.2f}")
                              
-                    trade_direction = secrets.SystemRandom().choice(["PUT", "CALL"])
+                    trade_direction = random.choice(["PUT", "CALL"])
                     last_contract_id = await execute_trade(websocket, trade_direction, calculated_target_stake)
                     
         except Exception as e:
