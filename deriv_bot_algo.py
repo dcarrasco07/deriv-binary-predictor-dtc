@@ -19,7 +19,7 @@ DERIV_REST_OTP_URL = f"https://api.derivws.com/trading/v1/options/accounts/{deri
 SUPPORTED_SYMBOLS = ['R_10', 'R_25', 'R_50', 'R_75', 'R_100']
 RISK_PERCENTAGE = 0.0001   # 0.01% of the total wallet account balance
 BASE_ENTRY_FLOOR = 0.35        # Deriv API absolute entry option floor
-MARTINGALE_MULTIPLIER = 1
+MARTINGALE_MULTIPLIER = 2.5
 PROFIT_SHAVE_RATE = 1       # Shaves off exactly 100% of clean wins as configured
 CURRENCY = 'USD'
 
@@ -135,6 +135,7 @@ def handle_settlement_data(contract):
             calculated_target_stake = calculate_base_percentage_stake()
         else:
             logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} ")
+            calculated_target_stake *= MARTINGALE_MULTIPLIER
 
         logging.info("[TOTAL NET PNL] VALUE: %s", total_net_pnl)
         
