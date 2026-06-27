@@ -208,7 +208,7 @@ async def get_authenticated_ws_url() -> str:
     except Exception as e:
         print(f"Deriv Bot Meta: Failed to fetch dynamic REST OTP: {e}")
     
-    print("Deriv Bot Meta: Retrying OTP token acquisition in 5 seconds...")
+    print("Deriv Bot Meta: Retrying OTP token acquisition in 5 seconds...")   
 
 async def main():
     while True: 
@@ -232,7 +232,9 @@ async def main():
                 await ws.send(json.dumps({"ticks": "R_100", "subscribe": 1}))
                 await process_ticks(ws)
         except Exception as e:
-            logging.error(f"Interface connection lost: {e}"); await asyncio.sleep(5)
+            logging.error(f"Interface connection lost: {e}. Attempting to reconnect in 5 seconds...")
+            asyncio.run(main())
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     try: asyncio.run(main())
