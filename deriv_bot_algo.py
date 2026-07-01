@@ -69,7 +69,7 @@ async def execute_trade(websocket, direction, stake):
     try:
         proposal_req = {
             "proposal": 1,
-            "amount": float(f"{stake:2f}"),
+            "amount": float(f"{round(stake, 2):.2f}"),
             "basis": "stake",
             "contract_type": direction,
             "currency": CURRENCY,
