@@ -9,11 +9,11 @@ import secrets
 
 # --- Configuration ---
 app_id = '32WzmZD0GdX5NdJKlPO7e'
-api_token = 'pat_a2ff9ed4e3c95be3518ea1d560c94eff196faedca95c306603c0dedde7e3f7c1'
-deriv_account_id = 'DOT90416964'
+# api_token = 'pat_a2ff9ed4e3c95be3518ea1d560c94eff196faedca95c306603c0dedde7e3f7c1'
+# deriv_account_id = 'DOT90416964'
 
-# api_token = 'pat_c5cbe64d305674c56b3812e62e49cd171dbf5366004a1bf8e6fb9628a249d44c'
-# deriv_account_id = 'ROT91151098'
+api_token = 'pat_c5cbe64d305674c56b3812e62e49cd171dbf5366004a1bf8e6fb9628a249d44c'
+deriv_account_id = 'ROT91151098'
 
 APP_ID = os.getenv('DERIV_APP_ID', app_id) 
 API_TOKEN = os.getenv('DERIV_API_TOKEN', api_token) 
