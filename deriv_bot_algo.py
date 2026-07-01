@@ -12,6 +12,9 @@ app_id = '32WzmZD0GdX5NdJKlPO7e'
 api_token = 'pat_a2ff9ed4e3c95be3518ea1d560c94eff196faedca95c306603c0dedde7e3f7c1'
 deriv_account_id = 'DOT90416964'
 
+# api_token = 'pat_c5cbe64d305674c56b3812e62e49cd171dbf5366004a1bf8e6fb9628a249d44c'
+# deriv_account_id = 'ROT91151098'
+
 APP_ID = os.getenv('DERIV_APP_ID', app_id) 
 API_TOKEN = os.getenv('DERIV_API_TOKEN', api_token) 
 DERIV_REST_OTP_URL = f"https://api.derivws.com/trading/v1/options/accounts/{deriv_account_id}/otp"
@@ -22,6 +25,7 @@ RISK_PERCENTAGE = 0.0001   # 0.01% of the total wallet account balance
 BASE_ENTRY_FLOOR = 0.35        # Deriv API absolute entry option floor
 MARTINGALE_MULTIPLIER = 2.5
 PROFIT_SHAVE_RATE = 1       # Shaves off exactly 100% of clean wins as configured
+MAX_MARTINGALE_PERCENTAGE = 0.03 # 3% of account balance
 CURRENCY = 'USD'
 
 # Storage Files
@@ -146,6 +150,8 @@ def handle_settlement_data(contract):
             logging.info(f"[RESULT] LOSS (${profit:.2f}) | Account Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Rebate Pool: ${session_rebate_pool} | Capital Pool: ${capital_pool:.2f}")
             consecutive_losses += 1  # Increment consecutive losses on a loss
             calculated_target_stake = round(calculated_target_stake * MARTINGALE_MULTIPLIER, 2)
+            # Ensure martingale stake does not exceed MAX_MARTINGALE_PERCENTAGE of capital pool
+            calculated_target_stake = min(calculated_target_stake, capital_pool * MAX_MARTINGALE_PERCENTAGE)
 
         logging.info("[TOTAL NET PNL] VALUE: %s", total_net_pnl)
         
