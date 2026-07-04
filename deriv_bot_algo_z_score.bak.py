@@ -41,19 +41,16 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # --- Shared Global Memory Spaces ---
 last_contract_id = None
-max_historical_loss = 0.0    
-current_streak_loss = 0.0    
+max_historical_loss = 0.0    # Peak single-streak consecutive drawdown depth tracker
+current_streak_loss = 0.0    # Running loss accumulation for the active losing streak
 total_net_pnl = 0.0      
 session_net_pnl = 0.0    
-
-# --- SIMULATED BALANCE ENGINE CONFIGURATION ---
-account_balance = 1000.0        # Hardcoded local starting balance simulator
-initial_capital = 1000.0
-minimum_capital = 1000.0 
-capital_pool = 1000.0 * 0.70
-
+account_balance = 0.0        
+initial_capital = 0.0
+capital_pool = 0.0
 calculated_target_stake = BASE_ENTRY_FLOOR  
 consecutive_losses = 0 
+minimum_capital = 0 
 max_session_loss = 0
 
 session_rebate_pool = 0.0  
@@ -127,16 +124,12 @@ async def send_data_safe(websocket, payload):
 
 def handle_settlement_data(contract):
     try: 
-        global last_contract_id, max_historical_loss, current_streak_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, consecutive_losses, capital_pool, minimum_capital, initial_capital, max_session_loss, account_balance
+        global last_contract_id, max_historical_loss, current_streak_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, consecutive_losses, capital_pool, minimum_capital, initial_capital, max_session_loss
         
         if not contract or not contract.get('is_sold'): 
             return
 
         profit = float(contract.get('profit', 0))
-        
-        # Adjust simulated local balance mathematically
-        account_balance = round(account_balance + profit, 2)
-        
         total_net_pnl += profit
         session_net_pnl += profit
         session_sign = "+" if profit >= 0 else ""
@@ -151,27 +144,30 @@ def handle_settlement_data(contract):
                 capital_pool += replenish_amount
                 session_rebate_pool -= replenish_amount 
                     
-            logging.info(f"[RESULT] WIN (+${profit:.2f}) | Simulated Balance: ${account_balance:.2f} | Session: {session_sign}${session_net_pnl:.2f} | Capital Pool: ${capital_pool:.2f}")
+            logging.info(f"[RESULT] WIN (+${profit:.2f}) | Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Capital Pool: ${capital_pool:.2f}")
             calculated_target_stake = calculate_base_percentage_stake()
             consecutive_losses = 0  
-            current_streak_loss = 0.0  
+            current_streak_loss = 0.0  # Reset current streak tracker on win
         else:
             capital_pool += profit  
             consecutive_losses += 1  
+            
+            # profit is negative on a loss, subtract it to accumulate a positive absolute value
             current_streak_loss -= profit 
             
+            # Update historic peak if the current losing streak drawdown surpasses it
             if current_streak_loss > max_historical_loss:
                 max_historical_loss = current_streak_loss
                 logging.warning(f"[RISK DETECTED] New Peak Accumulated Losing Streak Drawdown: -${max_historical_loss:.2f}")
                 
-            logging.info(f"[RESULT] LOSS (${profit:.2f}) | Simulated Balance: ${account_balance:.2f} | Session: {session_sign}${session_net_pnl:.2f} | Current Streak Loss: -${current_streak_loss:.2f} | Capital Pool: ${capital_pool:.2f}")
+            logging.info(f"[RESULT] LOSS (${profit:.2f}) | Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Current Streak Loss: -${current_streak_loss:.2f} | Capital Pool: ${capital_pool:.2f}")
             
             calculated_target_stake = round(calculated_target_stake * MARTINGALE_MULTIPLIER, 2)
             calculated_target_stake = min(calculated_target_stake, capital_pool * MAX_MARTINGALE_PERCENTAGE)
 
         minimum_capital = min(minimum_capital, account_balance)
         max_session_loss = minimum_capital - initial_capital
-        logging.info(f"[METRICS MONITOR] Max Session Loss (Peak Drawdown): ${max_session_loss:.2f} | Minimum Account Balance Reached: ${minimum_capital:.2f}")
+        logging.info(f"[METRICS MONITOR] Max Session Loss: ${max_session_loss:.2f} | Minimun Account Balance: -${minimum_capital:.2f}")
         last_contract_id = None
     except Exception as e:
         logging.error(f"handle settlement data: {e}")
@@ -183,8 +179,8 @@ async def process_ticks(websocket):
         try:
             payload = json.loads(message)
             
-            # --- OVERRIDDEN: Ignore broker network balance payloads to preserve simulation variables ---
             if 'balance' in payload:
+                account_balance = float(payload['balance']['balance'])
                 if not last_contract_id:
                     calculated_target_stake = calculate_base_percentage_stake()
             
@@ -246,8 +242,11 @@ async def main():
                 async for msg in ws:
                     auth_res = json.loads(msg)
                     if auth_res.get('msg_type') == 'authorize': 
-                        # --- OVERRIDDEN: Setup variables with hardcoded simulation configuration values ---
-                        logging.info("[SYSTEM] Initializing simulation architecture with baseline $1000.00 bankroll.")
+                        global account_balance, initial_capital, capital_pool, minimum_capital
+                        account_balance = float(auth_res['authorize']['balance'])
+                        initial_capital = account_balance
+                        minimum_capital = initial_capital
+                        capital_pool = initial_capital * 0.70
                         break
                 
                 await ws.send(json.dumps({"balance": 1, "subscribe": 1}))
