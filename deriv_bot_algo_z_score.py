@@ -11,9 +11,6 @@ from collections import deque
 
 # --- Configuration ---
 app_id = '32WzmZD0GdX5NdJKlPO7e'
-# api_token = 'pat_c5cbe64d305674c56b3812e62e49cd171dbf5366004a1bf8e6fb9628a249d44c'
-# deriv_account_id = 'ROT91151098'
-
 api_token = 'pat_a2ff9ed4e3c95be3518ea1d560c94eff196faedca95c306603c0dedde7e3f7c1'
 deriv_account_id = 'DOT90416964'
 
@@ -35,7 +32,6 @@ WINDOW_SIZE = 20          # Number of historical ticks to look back
 Z_SCORE_THRESHOLD = 2.0   # Trigger trade if price is outside +/- 2.0 standard deviations
 
 # --- Memory Buffers for Historical Data ---
-# Stores recent prices for each symbol to calculate rolling volatility metrics
 tick_history = {symbol: deque(maxlen=WINDOW_SIZE) for symbol in SUPPORTED_SYMBOLS}
 
 # Storage Files
@@ -44,7 +40,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # --- Shared Global Memory Spaces ---
 last_contract_id = None
-max_historical_loss = 0.0
+max_historical_loss = 0.0    # Peak single-streak consecutive drawdown depth tracker
+current_streak_loss = 0.0    # Running loss accumulation for the active losing streak
 total_net_pnl = 0.0      
 session_net_pnl = 0.0    
 account_balance = 0.0        
@@ -67,7 +64,6 @@ def generate_random_choice_ticks():
     return round(secrets.choice([secrets.SystemRandom().uniform(1, 4) for _ in range(4)]))
 
 def calculate_z_score(prices, current_price):
-    """Calculates how many standard deviations the current price is from the rolling mean."""
     n = len(prices)
     if n < WINDOW_SIZE:
         return 0.0
@@ -125,7 +121,7 @@ async def send_data_safe(websocket, payload):
 
 def handle_settlement_data(contract):
     try: 
-        global last_contract_id, max_historical_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, consecutive_losses, capital_pool
+        global last_contract_id, max_historical_loss, current_streak_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, consecutive_losses, capital_pool
         
         if not contract or not contract.get('is_sold'): 
             return
@@ -148,13 +144,25 @@ def handle_settlement_data(contract):
             logging.info(f"[RESULT] WIN (+${profit:.2f}) | Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Capital Pool: ${capital_pool:.2f}")
             calculated_target_stake = calculate_base_percentage_stake()
             consecutive_losses = 0  
+            current_streak_loss = 0.0  # Reset current streak tracker on win
         else:
             capital_pool += profit  
-            logging.info(f"[RESULT] LOSS (${profit:.2f}) | Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Capital Pool: ${capital_pool:.2f}")
             consecutive_losses += 1  
+            
+            # profit is negative on a loss, subtract it to accumulate a positive absolute value
+            current_streak_loss -= profit 
+            
+            # Update historic peak if the current losing streak drawdown surpasses it
+            if current_streak_loss > max_historical_loss:
+                max_historical_loss = current_streak_loss
+                logging.warning(f"[RISK DETECTED] New Peak Accumulated Losing Streak Drawdown: -${max_historical_loss:.2f}")
+                
+            logging.info(f"[RESULT] LOSS (${profit:.2f}) | Balance: ${account_balance} | Session: {session_sign}${session_net_pnl:.2f} | Current Streak Loss: -${current_streak_loss:.2f} | Capital Pool: ${capital_pool:.2f}")
+            
             calculated_target_stake = round(calculated_target_stake * MARTINGALE_MULTIPLIER, 2)
             calculated_target_stake = min(calculated_target_stake, capital_pool * MAX_MARTINGALE_PERCENTAGE)
 
+        logging.info(f"[METRICS MONITOR] Total Net P&L: {session_sign}${total_net_pnl:.2f} | Historic Peak Streak Loss: -${max_historical_loss:.2f}")
         last_contract_id = None
     except Exception as e:
         logging.error(f"handle settlement data: {e}")
@@ -179,22 +187,16 @@ async def process_ticks(websocket):
                 symbol = payload['tick']['symbol']
                 current_quote = float(payload['tick']['quote'])
                 
-                # Append current tick to our moving window
                 tick_history[symbol].append(current_quote)
-                
-                # Ensure we have gathered enough ticks to calculate clean data metrics
                 if len(tick_history[symbol]) < WINDOW_SIZE:
                     continue
                 
-                # Only check signals if the bot isn't currently inside an open contract
                 if not last_contract_id:
                     z_score = calculate_z_score(list(tick_history[symbol]), current_quote)
                     
                     trade_direction = None
-                    # Price is extremely overbought -> Expecting it to drop back down
                     if z_score >= Z_SCORE_THRESHOLD:
                         trade_direction = "PUT"
-                    # Price is extremely oversold -> Expecting a snap-back bounce upwards
                     elif z_score <= -Z_SCORE_THRESHOLD:
                         trade_direction = "CALL"
                         
