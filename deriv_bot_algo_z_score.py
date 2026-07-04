@@ -1,5 +1,6 @@
 import asyncio
 import json
+from mimetypes import init
 import os
 import websockets
 import logging
@@ -48,7 +49,9 @@ account_balance = 0.0
 initial_capital = 0.0
 capital_pool = 0.0
 calculated_target_stake = BASE_ENTRY_FLOOR  
-consecutive_losses = 0  
+consecutive_losses = 0 
+minimum_capital = 0 
+max_session_loss = 0
 
 session_rebate_pool = 0.0  
 all_time_rebate_pool = 0.0
@@ -121,7 +124,7 @@ async def send_data_safe(websocket, payload):
 
 def handle_settlement_data(contract):
     try: 
-        global last_contract_id, max_historical_loss, current_streak_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, consecutive_losses, capital_pool
+        global last_contract_id, max_historical_loss, current_streak_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, consecutive_losses, capital_pool, minimum_capital, initial_capital, max_session_loss
         
         if not contract or not contract.get('is_sold'): 
             return
@@ -162,7 +165,9 @@ def handle_settlement_data(contract):
             calculated_target_stake = round(calculated_target_stake * MARTINGALE_MULTIPLIER, 2)
             calculated_target_stake = min(calculated_target_stake, capital_pool * MAX_MARTINGALE_PERCENTAGE)
 
-        logging.info(f"[METRICS MONITOR] Total Net P&L: {session_sign}${total_net_pnl:.2f} | Historic Peak Streak Loss: -${max_historical_loss:.2f}")
+        minimum_capital = min(minimum_capital, account_balance)
+        max_session_loss = minimum_capital - initial_capital
+        logging.info(f"[METRICS MONITOR] Max Session Loss: ${max_session_loss:.2f} | Minimun Account Balance: -${minimum_capital:.2f}")
         last_contract_id = None
     except Exception as e:
         logging.error(f"handle settlement data: {e}")
@@ -237,9 +242,10 @@ async def main():
                 async for msg in ws:
                     auth_res = json.loads(msg)
                     if auth_res.get('msg_type') == 'authorize': 
-                        global account_balance, initial_capital, capital_pool
+                        global account_balance, initial_capital, capital_pool, minimum_capital
                         account_balance = float(auth_res['authorize']['balance'])
                         initial_capital = account_balance
+                        minimum_capital = initial_capital
                         capital_pool = initial_capital * 0.70
                         break
                 
