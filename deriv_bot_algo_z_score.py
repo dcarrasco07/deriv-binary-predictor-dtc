@@ -19,13 +19,11 @@ APP_ID = os.getenv('DERIV_APP_ID', app_id)
 API_TOKEN = os.getenv('DERIV_API_TOKEN', api_token) 
 DERIV_REST_OTP_URL = f"https://api.derivws.com/trading/v1/options/accounts/{deriv_account_id}/otp"
 
-# Risk & Scaling Settings
+# Risk & Scaling Settings (Flat Staking Architecture)
 SUPPORTED_SYMBOLS = ['R_10', 'R_25', 'R_50', 'R_75', 'R_100']
 RISK_PERCENTAGE = 0.0001   
 BASE_ENTRY_FLOOR = 0.35        
-MARTINGALE_MULTIPLIER = 2.5
 PROFIT_SHAVE_RATE = 1       
-MAX_MARTINGALE_PERCENTAGE = 0.03 
 CURRENCY = 'USD'
 
 # --- STATISTICAL ARBITRAGE PARAMETERS ---
@@ -46,8 +44,12 @@ current_streak_loss = 0.0
 total_net_pnl = 0.0      
 session_net_pnl = 0.0    
 
+# --- SESSION PERFORMANCE COUNTERS ---
+session_win_count = 0
+session_loss_count = 0
+
 # --- SIMULATED BALANCE ENGINE CONFIGURATION ---
-account_balance = 1000.0        # Hardcoded local starting balance simulator
+account_balance = 1000.0        
 initial_capital = 1000.0
 minimum_capital = 1000.0 
 capital_pool = 1000.0 * 0.70
@@ -128,13 +130,12 @@ async def send_data_safe(websocket, payload):
 def handle_settlement_data(contract):
     try: 
         global last_contract_id, max_historical_loss, current_streak_loss, total_net_pnl, session_net_pnl, all_time_rebate_pool, session_rebate_pool, calculated_target_stake, consecutive_losses, capital_pool, minimum_capital, initial_capital, max_session_loss, account_balance
+        global session_win_count, session_loss_count
         
         if not contract or not contract.get('is_sold'): 
             return
 
         profit = float(contract.get('profit', 0))
-        
-        # Adjust simulated local balance mathematically
         account_balance = round(account_balance + profit, 2)
         
         total_net_pnl += profit
@@ -142,6 +143,7 @@ def handle_settlement_data(contract):
         session_sign = "+" if profit >= 0 else ""
         
         if profit > 0:
+            session_win_count += 1
             shaved_allocation = profit * PROFIT_SHAVE_RATE
             session_rebate_pool += shaved_allocation
             all_time_rebate_pool += shaved_allocation
@@ -151,11 +153,11 @@ def handle_settlement_data(contract):
                 capital_pool += replenish_amount
                 session_rebate_pool -= replenish_amount 
                     
-            logging.info(f"[RESULT] WIN (+${profit:.2f}) | Simulated Balance: ${account_balance:.2f} | Session: {session_sign}${session_net_pnl:.2f} | Capital Pool: ${capital_pool:.2f}")
-            calculated_target_stake = calculate_base_percentage_stake()
+            logging.info(f"[RESULT] WIN (+${profit:.2f}) | Simulated Balance: ${account_balance:.2f} | Capital Pool: ${capital_pool:.2f}")
             consecutive_losses = 0  
             current_streak_loss = 0.0  
         else:
+            session_loss_count += 1
             capital_pool += profit  
             consecutive_losses += 1  
             current_streak_loss -= profit 
@@ -164,14 +166,21 @@ def handle_settlement_data(contract):
                 max_historical_loss = current_streak_loss
                 logging.warning(f"[RISK DETECTED] New Peak Accumulated Losing Streak Drawdown: -${max_historical_loss:.2f}")
                 
-            logging.info(f"[RESULT] LOSS (${profit:.2f}) | Simulated Balance: ${account_balance:.2f} | Session: {session_sign}${session_net_pnl:.2f} | Current Streak Loss: -${current_streak_loss:.2f} | Capital Pool: ${capital_pool:.2f}")
+            logging.info(f"[RESULT] LOSS (${profit:.2f}) | Simulated Balance: ${account_balance:.2f} | Current Streak Loss: -${current_streak_loss:.2f} | Capital Pool: ${capital_pool:.2f}")
             
-            calculated_target_stake = round(calculated_target_stake * MARTINGALE_MULTIPLIER, 2)
-            calculated_target_stake = min(calculated_target_stake, capital_pool * MAX_MARTINGALE_PERCENTAGE)
+        # --- FIXED: Enforce absolute flat-staking sizing logic (Martingale entirely stripped out) ---
+        calculated_target_stake = calculate_base_percentage_stake()
+
+        # Performance Analytics Calculations
+        total_trades = session_win_count + session_loss_count
+        win_rate = (session_win_count / total_trades) * 100 if total_trades > 0 else 0.0
 
         minimum_capital = min(minimum_capital, account_balance)
         max_session_loss = minimum_capital - initial_capital
-        logging.info(f"[METRICS MONITOR] Max Session Loss (Peak Drawdown): ${max_session_loss:.2f} | Minimum Account Balance Reached: ${minimum_capital:.2f}")
+        
+        logging.info(f"[SESSION METRICS] Wins: {session_win_count} | Losses: {session_loss_count} | Win Rate: {win_rate:.2f}%")
+        logging.info(f"[RISK MONITOR] Max Session Loss (Peak Drawdown): ${max_session_loss:.2f} | Minimum Account Balance Reached: ${minimum_capital:.2f}")
+        
         last_contract_id = None
     except Exception as e:
         logging.error(f"handle settlement data: {e}")
@@ -183,7 +192,6 @@ async def process_ticks(websocket):
         try:
             payload = json.loads(message)
             
-            # --- OVERRIDDEN: Ignore broker network balance payloads to preserve simulation variables ---
             if 'balance' in payload:
                 if not last_contract_id:
                     calculated_target_stake = calculate_base_percentage_stake()
@@ -246,7 +254,6 @@ async def main():
                 async for msg in ws:
                     auth_res = json.loads(msg)
                     if auth_res.get('msg_type') == 'authorize': 
-                        # --- OVERRIDDEN: Setup variables with hardcoded simulation configuration values ---
                         logging.info("[SYSTEM] Initializing simulation architecture with baseline $1000.00 bankroll.")
                         break
                 
